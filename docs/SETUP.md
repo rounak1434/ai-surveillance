@@ -23,7 +23,7 @@ FFmpeg/ffprobe ship inside the test-stream, api and Frigate images. The integrat
 ## Quick start (copy and paste)
 After Docker is installed (section 1):
 ```bash
-git clone -b feat/initial-platform https://github.com/rounak1434/Face_detection.git ~/ai-surveillance
+git clone https://github.com/rounak1434/ai-surveillance.git ~/ai-surveillance
 cd ~/ai-surveillance/deploy
 cp .env.example .env && chmod 600 .env
 sed -i "s/^INFERENCE_API_TOKEN=.*/INFERENCE_API_TOKEN=$(openssl rand -hex 32)/" .env   # api ↔ inference secret
@@ -59,13 +59,13 @@ docker version && docker compose version && docker run --rm hello-world
 
 ## 2. Get the code
 ```bash
-git clone -b feat/initial-platform https://github.com/rounak1434/Face_detection.git ~/ai-surveillance
+git clone https://github.com/rounak1434/ai-surveillance.git ~/ai-surveillance
 cd ~/ai-surveillance
 git log --oneline -3          # newest commit first
 ```
-Until it is merged, the work lives on the `feat/initial-platform` branch. In an existing clone, update it with:
+The project is on the `main` branch. In an existing clone, update it with:
 ```bash
-git switch feat/initial-platform && git pull --ff-only
+git switch main && git pull --ff-only
 ```
 
 ## 3. Configure (`deploy/.env`)
