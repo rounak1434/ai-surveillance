@@ -21,11 +21,11 @@ from sqlalchemy.orm import Session
 from .. import devices as dev
 from ..credentials import REPAIR_HINT, CredentialError
 from ..db import Device, as_utc, utcnow
-from ..deps import AppState, current_user, get_db, get_state
+from ..deps import AppState, admin, get_db, get_state
 from ..frigate_config import MAX_DEVICES as MAX_FRIGATE_DEVICES
 from ..netguard import AddressNotAllowed, check_ip, parse_networks, validate_host_syntax
 
-router = APIRouter(prefix="/api/devices", tags=["devices"], dependencies=[Depends(current_user)])
+router = APIRouter(prefix="/api/devices", tags=["devices"], dependencies=[Depends(admin)])
 log = logging.getLogger(__name__)
 
 _CONTROL = set(chr(c) for c in range(32)) | {chr(127)}

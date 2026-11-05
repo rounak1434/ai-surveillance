@@ -80,10 +80,62 @@ class Settings(BaseSettings):
     recognition_reject_threshold: float = Field(default=0.30, ge=-1.0, le=1.0)
     recognition_min_face_px: int = Field(default=40, ge=1)
 
+    # Real-time Frigate events over MQTT (mqtt_events.py). Off unless configured: compose turns it on
+    # together with the mosquitto service. While connected, finished person events wake the face-event
+    # ingestion at once and the HTTP poll becomes a reconciliation pass every face_reconcile_seconds;
+    # gate lines need MQTT (they use the positions in Frigate's event updates).
+    mqtt_enabled: bool = False
+    mqtt_host: str = "mosquitto"
+    mqtt_port: int = Field(default=1883, ge=1, le=65535)
+    mqtt_username: str | None = None
+    mqtt_password: SecretStr | None = None
+    mqtt_topic_prefix: str = "frigate"  # Frigate's mqtt.topic_prefix
+    mqtt_reconnect_max_seconds: float = Field(default=30.0, gt=0)
+    face_reconcile_seconds: float = Field(default=60.0, gt=0)
+
+    # Gate lines (gate.py). A person's position is the bottom centre of Frigate's box (where the feet
+    # are). Points closer to the line than gate_dead_zone (fraction of the frame) keep the previous side,
+    # so jitter on the line is not counted as crossings. A track is forgotten after gate_track_timeout.
+    gate_dead_zone: float = Field(default=0.02, ge=0.0, le=0.2)
+    gate_track_timeout_seconds: float = Field(default=600.0, gt=0)
+    gate_crossing_retention_days: int = Field(default=90, ge=0)
+
+    # Alarm output (alarm.py). "simulation" (default) only records what would have happened;
+    # "http_relay" switches a network relay on the LAN and needs alarm_relay_on_url; "none" records
+    # alerts without any alarm. A physical output is never used unless it is configured here.
+    alarm_output: Literal["simulation", "http_relay", "none"] = "simulation"
+    alarm_relay_on_url: str | None = None  # e.g. http://192.168.1.60/relay/0?turn=on (IP address, LAN only)
+    alarm_relay_off_url: str | None = None
+    alarm_relay_method: Literal["GET", "POST"] = "GET"
+    alarm_relay_username: str | None = None
+    alarm_relay_password: SecretStr | None = None
+    alarm_duration_seconds: float = Field(default=10.0, gt=0, le=600)
+    alarm_cooldown_seconds: float = Field(default=60.0, ge=0)
+    alarm_timeout_seconds: float = Field(default=5.0, gt=0)
+    alarm_max_silence_minutes: int = Field(default=240, ge=1)
+    # Alert delivery besides the in-app list: a JSON POST to a LAN webhook (IP address, LAN only).
+    # "needs_review" alerts are delivered too unless alert_webhook_review is false.
+    alert_webhook_url: str | None = None
+    alert_webhook_review: bool = True
+    alert_retention_days: int = Field(default=90, ge=0)
+
+    # Event footage (footage.py): the clip opened from an event covers [start - pre, end + post],
+    # at most event_clip_max_seconds. Frigate keeps recordings frigate_recording_days (must match
+    # record.continuous.days in Frigate's config); older footage is reported as expired.
+    event_clip_pre_seconds: int = Field(default=5, ge=0, le=120)
+    event_clip_post_seconds: int = Field(default=5, ge=0, le=120)
+    event_clip_max_seconds: int = Field(default=120, ge=5, le=600)
+    frigate_recording_days: int = Field(default=3, ge=0)
+
+    # Audit log entries older than this many days are deleted hourly; 0 keeps them.
+    audit_retention_days: int = Field(default=365, ge=0)
+
     @model_validator(mode="after")
     def _thresholds_ordered(self) -> "Settings":
         if self.recognition_reject_threshold >= self.recognition_accept_threshold:
             raise ValueError("RECOGNITION_REJECT_THRESHOLD must be below RECOGNITION_ACCEPT_THRESHOLD")
+        if self.alarm_output == "http_relay" and not self.alarm_relay_on_url:
+            raise ValueError("ALARM_OUTPUT=http_relay needs ALARM_RELAY_ON_URL")
         return self
 
     session_ttl_hours: int = 12

@@ -368,6 +368,21 @@ Three focused commits, each verified with its own tests before committing; then 
 
 Regression at `b5b6a17`: Windows backend **640 passed, 13 skipped**, inference **67 passed, 1 skipped**, frontend **69 passed**, `tsc` and build OK, `ruff` clean, sensitive suites (proxy, auth, deploy config, switch, privacy, audit, recognition, Apply, concurrency) **161 passed ×3**; Linux (fresh clone of `b5b6a17`) backend **649 passed, 4 skipped**, real-model tests **5 passed**, migrations **109 passed**, face suites incl. proxy and deploy config **196 passed ×3**, Apply/secrets/concurrency **69 ×3**, static Compose valid (0 schema errors, 0 problems, negative controls caught). No container engine on either machine: the health checks, the edge network and the forwarded-header trust have **not** run on Docker. Diff since `c57161b`: 15 intended files, no database, `.env`, key or media files, no secrets. Commit messages written without a byte-order mark and checked (`66 69 78` = "fix").
 
+## Gate monitoring features, 2026-11-05, base `81682fb`
+Roles and accounts, gate lines and crossings, MQTT ingestion, alerts and alarm output, event footage, estimator and liveness status, privacy and retention, Ubuntu start-up scripts.
+
+Automated tests were **not run**, as the owner instructed. New tests are in `test_gate_alarm_roles.py` and one in `test_gallery_api.py`. Three existing tests were adapted to intended changes: `test_auth.py` (`/me` returns the role), `test_dbtools.py` (head revision `0006`) and the `_audit` helper in `test_gallery_api.py` (reads are audited now).
+
+| Check performed | Result |
+|---|---|
+| `python -m compileall` (backend package and tests) | OK |
+| `ruff check backend` | Clean |
+| `tsc --noEmit` (frontend) | OK |
+| `aiomqtt 2.5.1` / `paho-mqtt 2.2.0` installed in the dev venv; `aiomqtt.Client` signature and `messages` checked | OK |
+| Pushing runs GitHub CI on `new-origin` | Not observed here |
+
+**Nothing was run** on Docker, Frigate, mosquitto, a relay, a siren, the NVR or a camera. Every behaviour above is "Done (code)" until [ACCEPTANCE-CHECKLIST.md](ACCEPTANCE-CHECKLIST.md) is carried out.
+
 ## To fill in on the Ubuntu host
 ```
 Date:

@@ -27,7 +27,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
@@ -35,7 +35,7 @@ from . import recognition
 from .captures import InsufficientStorage, check_free_space
 from .config import Settings
 from .credentials import CredentialCipher
-from .db import FaceDetection, FaceEvent, Person, as_utc, new_id, utcnow
+from .db import FaceDetection, FaceEvent, GateCrossing, Person, as_utc, new_id, utcnow
 from .face_detection import FACES_DETECTED, GAVE_UP, EventFaces, detect_event_faces
 from .gallery import FACE_EVENT_DELETED, audit
 from .frigate_client import FrigateClient, FrigateError, PersonEvent
@@ -247,7 +247,12 @@ class Ingestor:
                         similarity=m.similarity if m is not None else None,
                         accept_threshold=self.settings.recognition_accept_threshold if m is not None else None,
                         reject_threshold=self.settings.recognition_reject_threshold if m is not None else None,
+                        attributes=face.attributes, liveness=face.liveness,
                     ))
+                # Gate crossings of the same Frigate track get this face event's frame, crops and footage.
+                db.execute(update(GateCrossing).where(GateCrossing.frigate_event_id == result.event.id,
+                                                      GateCrossing.face_event_id.is_(None))
+                           .values(face_event_id=event.id))
                 db.commit()
             return True
         except IntegrityError:
@@ -304,7 +309,9 @@ def purge_old_face_events(sessions: sessionmaker, store: MediaStore, days: int) 
     return removed
 
 
-async def face_ingest_loop(ingestor: Ingestor) -> None:
+async def face_ingest_loop(ingestor: Ingestor, wake: asyncio.Event | None = None, mqtt=None) -> None:
+    """Poll Frigate's events. With MQTT (mqtt_events.py) a finished person event sets `wake` and the
+    poll runs at once; the timed poll is then only a reconciliation pass (FACE_RECONCILE_SECONDS)."""
     while True:
         try:
             stats = await ingestor.ingest_once()
@@ -312,7 +319,16 @@ async def face_ingest_loop(ingestor: Ingestor) -> None:
                 log.info("Face events: stored %d new event(s)", stats.stored)
         except Exception:
             log.exception("Face event ingestion failed; retrying")
-        await asyncio.sleep(ingestor.settings.face_poll_seconds)
+        settings = ingestor.settings
+        interval = settings.face_reconcile_seconds if mqtt is not None and mqtt.connected else settings.face_poll_seconds
+        if wake is None:
+            await asyncio.sleep(interval)
+            continue
+        try:
+            await asyncio.wait_for(wake.wait(), interval)
+        except TimeoutError:
+            pass
+        wake.clear()
 
 
 async def face_retention_loop(sessions: sessionmaker, store: MediaStore, days: int) -> None:

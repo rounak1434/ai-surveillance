@@ -1,7 +1,7 @@
 import logging
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -15,15 +15,25 @@ from ..captures import (
     run_clip_export,
     take_snapshot,
 )
-from ..db import Capture, as_utc
-from ..deps import AppState, current_user, get_db, get_state, known_camera
+from ..db import AdminUser, Capture, as_utc
+from ..deps import AppState, admin, get_db, get_state, known_camera, operator
+from ..gallery import FOOTAGE_VIEWED, audit
 
-router = APIRouter(prefix="/api", tags=["captures"], dependencies=[Depends(current_user)])
+# Captures are footage: operators and administrators only; deleting them needs an administrator.
+router = APIRouter(prefix="/api", tags=["captures"], dependencies=[Depends(operator)])
 log = logging.getLogger(__name__)
 
 
 class ClipRequest(BaseModel):
     seconds: int | None = None
+
+
+def _error(c: Capture) -> str | None:
+    """Frigate's answer for a gap in the recordings, in words an operator can act on."""
+    if c.error and "No recordings found" in c.error:
+        return ("No recording covers this time: it has expired (Frigate's retention) or the camera was not "
+                "recording then.")
+    return c.error
 
 
 def _to_dict(c: Capture) -> dict:
@@ -36,8 +46,9 @@ def _to_dict(c: Capture) -> dict:
         "created_at": as_utc(c.created_at).isoformat(),
         "size_bytes": c.size_bytes,
         "duration_seconds": c.duration_seconds,
-        "error": c.error,
+        "error": _error(c),
         "file_url": f"/api/captures/{c.id}/file" if c.status == "ready" else None,
+        "source": c.source,  # "face_event:<id>" / "crossing:<id>" for event footage, else null
     }
 
 
@@ -95,7 +106,7 @@ def get_capture(capture_id: str, db: Session = Depends(get_db)) -> dict:
     return _to_dict(capture)
 
 
-@router.delete("/captures/{capture_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/captures/{capture_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(admin)])
 async def delete_capture(capture_id: str, db: Session = Depends(get_db), state: AppState = Depends(get_state)) -> None:
     capture = db.get(Capture, capture_id)
     if capture is None:
@@ -127,7 +138,8 @@ async def delete_capture(capture_id: str, db: Session = Depends(get_db), state: 
 
 
 @router.get("/captures/{capture_id}/file")
-def capture_file(capture_id: str, db: Session = Depends(get_db), state: AppState = Depends(get_state)):
+def capture_file(capture_id: str, request: Request, db: Session = Depends(get_db), state: AppState = Depends(get_state),
+                 user: AdminUser = Depends(operator)):
     capture = db.get(Capture, capture_id)
     if capture is None or capture.status != "ready" or not capture.file_name:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Capture file not available")
@@ -137,5 +149,9 @@ def capture_file(capture_id: str, db: Session = Depends(get_db), state: AppState
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Capture file not available") from exc
     if not path.is_file():
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Capture file missing on disk")
+    # Event footage is audited once per playback: the player's follow-up range requests are not.
+    if capture.source and request.headers.get("range", "bytes=0-").startswith("bytes=0-"):
+        audit(db, user.username, FOOTAGE_VIEWED, "capture", capture.id, capture.source)
+        db.commit()
     media_type = "video/mp4" if capture.kind == "clip" else "image/jpeg"
     return FileResponse(path, media_type=media_type, headers={"Cache-Control": "private, no-store"})

@@ -36,4 +36,6 @@ async def health(state: AppState = Depends(get_state)) -> dict:
         "version": __version__,
         "frigate": frigate,
         "inference": inference,
+        # Unauthenticated endpoint: connection state only, no broker address or error text.
+        "mqtt": {"enabled": state.mqtt is not None, "connected": bool(state.mqtt and state.mqtt.connected)},
     }

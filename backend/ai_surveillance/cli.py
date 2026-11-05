@@ -1,6 +1,7 @@
 """Command-line tools.
 
-  ai-surveillance create-admin <username>       prompts for a password
+  ai-surveillance create-admin <username>       prompts for a password; also administrator recovery
+  ai-surveillance list-users                     accounts and roles
   ai-surveillance probe --env CAMERA_MAIN_URL    checks streams with ffprobe
   ai-surveillance db status                      shows the schema revision (read-only)
   ai-surveillance db upgrade                     backs up, then migrates to the latest revision
@@ -21,7 +22,8 @@ from pathlib import Path
 from sqlalchemy import select
 
 from .config import get_settings
-from .db import AdminUser, Database
+from .db import ROLE_ADMIN, AdminUser, Database, utcnow
+from .gallery import PASSWORD_RESET, USER_CREATED, audit
 from .rtsp import probe
 from .security import MIN_PASSWORD_LENGTH, hash_password, revoke_user_sessions
 
@@ -41,14 +43,30 @@ def create_admin(username: str) -> int:
     with db.sessionmaker() as session:
         user = session.scalar(select(AdminUser).where(AdminUser.username == username))
         if user is None:
-            session.add(AdminUser(username=username, password_hash=password_hash))
+            user = AdminUser(username=username, password_hash=password_hash, role=ROLE_ADMIN,
+                             password_changed_at=utcnow())
+            session.add(user)
+            session.flush()
+            audit(session, "cli", USER_CREATED, "user", user.id, "administrator created on the host")
             action = "Created"
         else:
-            user.password_hash = password_hash
+            # Administrator recovery: also re-enables the account and makes it an administrator.
+            user.password_hash, user.role, user.disabled, user.password_changed_at = (
+                password_hash, ROLE_ADMIN, False, utcnow())
             revoke_user_sessions(session, user.id)
+            audit(session, "cli", PASSWORD_RESET, "user", user.id, "administrator recovery on the host")
             action = "Updated password (and signed out all sessions) for"
         session.commit()
     print(f"{action} admin user {username!r}.")
+    return 0
+
+
+def list_users() -> int:
+    db = Database(get_settings().database_url)
+    db.migrate()
+    with db.sessionmaker() as session:
+        for user in session.scalars(select(AdminUser).order_by(AdminUser.username)):
+            print(f"{user.username}\t{user.role}\t{'disabled' if user.disabled else 'active'}")
     return 0
 
 
@@ -201,8 +219,10 @@ def probe_urls(urls: list[str], timeout: float) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ai-surveillance")
     sub = parser.add_subparsers(dest="command", required=True)
-    p_admin = sub.add_parser("create-admin", help="create or reset an administrator")
+    p_admin = sub.add_parser("create-admin", help="create an administrator, or recover one (new password, "
+                                                  "admin role, re-enabled, signed out everywhere)")
     p_admin.add_argument("username")
+    sub.add_parser("list-users", help="list accounts with their role (no passwords)")
     p_probe = sub.add_parser("probe", help="check RTSP streams with ffprobe (credentials are masked)")
     p_probe.add_argument("urls", nargs="*", help="URLs without secrets; prefer --env for credentialed URLs")
     p_probe.add_argument(
@@ -221,6 +241,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "create-admin":
         return create_admin(args.username)
+    if args.command == "list-users":
+        return list_users()
     if args.command == "db":
         if args.action in ("backup", "verify", "restore"):
             return db_file_command(args.action, args.path, args.yes, args.replace_unreadable)

@@ -22,6 +22,7 @@ import binascii
 import logging
 from dataclasses import dataclass, field
 
+from .attributes import sanitize_attributes, sanitize_liveness
 from .config import Settings
 from .frigate_client import FrigateClient, FrigateNotFound, PersonEvent
 from .inference_client import InferenceClient, InferenceUnavailable
@@ -50,6 +51,8 @@ class DetectedFace:
     crop_jpeg: bytes | None
     embedding: tuple[float, ...] | None = None  # Phase 6, only while recognition is on; never stored
     match: object | None = None  # recognition.Match, set by the ingestion loop
+    attributes: str | None = None  # validated JSON (attributes.py), only if a model produced estimates
+    liveness: str | None = None
 
 
 @dataclass
@@ -155,7 +158,8 @@ async def detect_event_faces(event: PersonEvent, frigate: FrigateClient, inferen
     faces = [
         DetectedFace(box={k: int(f["box"][k]) for k in _BOX}, score=float(f["score"]), keypoints5=f["keypoints5"],
                      quality=f.get("quality") if isinstance(f.get("quality"), dict) else {}, crop_jpeg=_crop(f),
-                     embedding=recognition.decode_embedding(f.get("embedding")) if done else None)
+                     embedding=recognition.decode_embedding(f.get("embedding")) if done else None,
+                     attributes=sanitize_attributes(f.get("attributes")), liveness=sanitize_liveness(f.get("liveness")))
         for f in result["faces"] if _valid_face(f)
     ]
     image = result.get("image") or {}

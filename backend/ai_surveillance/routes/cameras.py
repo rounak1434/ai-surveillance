@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
-from ..deps import AppState, current_user, get_state, known_camera
+from ..deps import AppState, get_state, known_camera, viewer
 from ..frigate_client import FrigateError
 
-router = APIRouter(prefix="/api/cameras", tags=["cameras"], dependencies=[Depends(current_user)])
+router = APIRouter(prefix="/api/cameras", tags=["cameras"], dependencies=[Depends(viewer)])
 
 
 @router.get("")

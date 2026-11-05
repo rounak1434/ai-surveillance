@@ -72,11 +72,27 @@ def _enroll(client, person_id, data=JPEG, ctype="image/jpeg"):
     return client.post(f"/api/people/{person_id}/faces", files={"file": ("photo.jpg", data, ctype)})
 
 
-def _audit(db) -> list[tuple]:
-    """In insertion order (rowid): two entries can share a timestamp on a coarse clock."""
+_ACCESS = {"biometric_profile_viewed", "reference_image_viewed"}  # reads, audited since 0006
+
+
+def _audit(db, access: bool = False) -> list[tuple]:
+    """Changes (or, with access=True, only reads) in insertion order (rowid): two entries can share
+    a timestamp on a coarse clock."""
     with db.sessionmaker() as s:
         return [(e.username, e.action, e.target_type, e.target_id, e.detail)
-                for e in s.scalars(select(AuditEntry).order_by(text("rowid")))]
+                for e in s.scalars(select(AuditEntry).order_by(text("rowid"))) if (e.action in _ACCESS) == access]
+
+
+def test_viewing_a_profile_and_its_images_is_audited(signed_in, db, detect):
+    detect.respond(200, json=_detect(_face()))
+    person = _create(signed_in)
+    face = _enroll(signed_in, person["id"]).json()
+    assert signed_in.get(f"/api/people/{person['id']}").status_code == 200
+    assert signed_in.get(face["image_url"]).status_code == 200
+    assert _audit(db, access=True) == [
+        (ADMIN_USER, "biometric_profile_viewed", "person", person["id"], None),
+        (ADMIN_USER, "reference_image_viewed", "reference_face", face["id"], f"person {person['id']}"),
+    ]
 
 
 def _delete(client, person_id, password=ADMIN_PASSWORD):

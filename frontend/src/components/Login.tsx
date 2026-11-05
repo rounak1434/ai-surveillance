@@ -1,7 +1,7 @@
 import { FormEvent, useState } from "react";
-import { api } from "../api";
+import { api, Me } from "../api";
 
-type Props = { appName: string; onSignedIn: (user: string) => void; notice?: string | null };
+type Props = { appName: string; onSignedIn: (user: Me) => void; notice?: string | null };
 
 export function Login({ appName, onSignedIn, notice }: Props) {
   const [username, setUsername] = useState("");
@@ -15,7 +15,7 @@ export function Login({ appName, onSignedIn, notice }: Props) {
     setError(null);
     try {
       const me = await api.login(username, password);
-      onSignedIn(me.username);
+      onSignedIn(me);
     } catch (err) {
       setError((err as Error).message);
     } finally {

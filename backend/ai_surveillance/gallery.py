@@ -29,6 +29,27 @@ PASSWORD_CONFIRMATION_FAILED = "password_confirmation_failed"
 RECOGNITION_ENABLED = "recognition_enabled"
 RECOGNITION_DISABLED = "recognition_disabled"
 FACE_EVENT_DELETED = "face_event_deleted"  # by an operator; retention deletions are logged, not audited
+# Accounts (0006)
+USER_CREATED = "user_created"
+USER_UPDATED = "user_updated"
+USER_DELETED = "user_deleted"
+PASSWORD_CHANGED = "password_changed"  # by the user themselves
+PASSWORD_RESET = "password_reset"  # by an administrator
+# Access to biometric profiles and event footage (0006)
+PROFILE_VIEWED = "biometric_profile_viewed"
+REFERENCE_IMAGE_VIEWED = "reference_image_viewed"
+EVENT_IMAGE_VIEWED = "event_image_viewed"
+FOOTAGE_REQUESTED = "event_footage_requested"
+FOOTAGE_VIEWED = "event_footage_viewed"
+# Gate, alarm, privacy (0006)
+GATE_LINE_SAVED = "gate_line_saved"
+GATE_LINE_DELETED = "gate_line_deleted"
+ALARM_TESTED = "alarm_tested"
+ALARM_SILENCED = "alarm_silenced"
+ALARM_UNSILENCED = "alarm_unsilenced"
+ALERT_ACKNOWLEDGED = "alert_acknowledged"
+EMBEDDINGS_PURGED = "reference_embeddings_purged"
+RETENTION_RUN = "retention_run"
 
 
 def audit(db: Session, username: str, action: str, target_type: str | None = None, target_id: str | None = None,

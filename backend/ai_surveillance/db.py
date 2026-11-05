@@ -5,8 +5,8 @@ from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from sqlalchemy import (Boolean, Date, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, create_engine,
-                        event, false, true)
+from sqlalchemy import (Boolean, Date, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text,
+                        UniqueConstraint, create_engine, event, false, true)
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -28,13 +28,24 @@ class Base(DeclarativeBase):
     pass
 
 
+ROLE_ADMIN, ROLE_OPERATOR, ROLE_VIEWER = "admin", "operator", "viewer"
+ROLES = (ROLE_VIEWER, ROLE_OPERATOR, ROLE_ADMIN)  # each role can do everything the previous one can
+
+
 class AdminUser(Base):
+    """A user account. The table name predates roles (0006): accounts created before were all administrators."""
+
     __tablename__ = "admin_users"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     username: Mapped[str] = mapped_column(String(64), unique=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # admin | operator | viewer. The CLI's create-admin always makes an administrator; the users API
+    # sets the role explicitly.
+    role: Mapped[str] = mapped_column(String(16), default=ROLE_ADMIN, server_default=ROLE_ADMIN)
+    disabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class LoginSession(Base):
@@ -61,6 +72,10 @@ class Capture(Base):
     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     frigate_export_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Event footage (0006): "face_event:<id>" or "crossing:<id>", and the exported time range.
+    source: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    clip_start: Mapped[float | None] = mapped_column(Float, nullable=True)
+    clip_end: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class Device(Base):
@@ -139,6 +154,10 @@ class FaceDetection(Base):
     similarity: Mapped[float | None] = mapped_column(Float, nullable=True)  # best cosine similarity found
     accept_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)  # thresholds used for this face
     reject_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # 0006: model estimates (attributes.py), JSON; null when no model produced them. Display only:
+    # never read by matching, gate decisions or alarms.
+    attributes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    liveness: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class AppSetting(Base):
@@ -207,6 +226,76 @@ class AuditEntry(Base):
     target_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     target_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     detail: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+
+class GateLine(Base):
+    """A virtual gate line on one camera (0006). Coordinates are fractions of the frame (0..1), so the
+    line fits every stream resolution. The arrow points to the `in_side` of the line p1 -> p2."""
+
+    __tablename__ = "gate_lines"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    camera: Mapped[str] = mapped_column(String(64), unique=True)  # one line per camera
+    name: Mapped[str] = mapped_column(String(64))
+    x1: Mapped[float] = mapped_column(Float)
+    y1: Mapped[float] = mapped_column(Float)
+    x2: Mapped[float] = mapped_column(Float)
+    y2: Mapped[float] = mapped_column(Float)
+    in_side: Mapped[str] = mapped_column(String(8))  # "left" | "right" of p1 -> p2 (image coordinates)
+    record_exits: Mapped[bool] = mapped_column(Boolean, default=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Off by default: an alarm on this line also needs a configured alarm output.
+    alarm_on_unauthorized: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    cooldown_seconds: Mapped[int] = mapped_column(Integer, default=10)
+    updated_by: Mapped[str] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class GateCrossing(Base):
+    """One directional crossing of a gate line by one Frigate-tracked person (0006)."""
+
+    __tablename__ = "gate_crossings"
+    __table_args__ = (UniqueConstraint("line_id", "frigate_event_id", "sequence", name="uq_gate_crossing"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    line_id: Mapped[str] = mapped_column(ForeignKey("gate_lines.id", ondelete="CASCADE"), index=True)
+    camera: Mapped[str] = mapped_column(String(64), index=True)
+    frigate_event_id: Mapped[str] = mapped_column(String(30), index=True)  # Frigate's tracked-object id
+    sequence: Mapped[int] = mapped_column(Integer)  # 1, 2, ... per track and line; unique with both
+    direction: Mapped[str] = mapped_column(String(8))  # "in" | "out"
+    crossed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    frame_time: Mapped[float] = mapped_column(Float)
+    point_x: Mapped[float] = mapped_column(Float)
+    point_y: Mapped[float] = mapped_column(Float)
+    # pending | AUTHORIZED | UNAUTHORIZED | NEEDS_REVIEW | NOT_CHECKED (gate.py)
+    verdict: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    reason: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    outcome: Mapped[str | None] = mapped_column(String(16), nullable=True)  # the face's recognition outcome
+    similarity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    person_id: Mapped[str | None] = mapped_column(ForeignKey("people.id", ondelete="SET NULL"), nullable=True)
+    face_event_id: Mapped[str | None] = mapped_column(ForeignKey("face_events.id", ondelete="SET NULL"),
+                                                      nullable=True, index=True)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Alert(Base):
+    """Something an operator should see: an unauthorized entry, a crossing that needs review, an alarm test."""
+
+    __tablename__ = "alerts"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    kind: Mapped[str] = mapped_column(String(24))  # unauthorized_entry | needs_review | alarm_test
+    camera: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    crossing_id: Mapped[str | None] = mapped_column(ForeignKey("gate_crossings.id", ondelete="SET NULL"),
+                                                    nullable=True, index=True)
+    detail: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True)  # open | acknowledged
+    acknowledged_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # none | simulated | activated | failed | silenced | cooldown | disabled
+    alarm: Mapped[str] = mapped_column(String(16), default="none")
+    delivery: Mapped[str | None] = mapped_column(String(500), nullable=True)  # webhook result
 
 
 def make_engine(database_url: str) -> Engine:

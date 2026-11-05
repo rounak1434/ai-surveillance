@@ -1,10 +1,13 @@
 # Starts the stack at boot and after power recovery.
-# Install: see docs/SETUP.md ("Start on boot").
+# Install: sudo deploy/install-service.sh (docs/OPERATIONS.md). The containers themselves use
+# "restart: unless-stopped", so Docker also restarts any one that crashes.
 [Unit]
 Description=AI Surveillance stack (docker compose)
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target
+# A failed start (Docker not ready yet after a power cut) is retried below; do not give up early.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
@@ -13,6 +16,8 @@ WorkingDirectory=/opt/ai-surveillance/deploy
 # Add "-f compose.yaml -f compose.nvidia.yaml" once the GPU is verified.
 ExecStart=/usr/bin/docker compose up -d --remove-orphans
 ExecStop=/usr/bin/docker compose down
+Restart=on-failure
+RestartSec=15
 TimeoutStartSec=300
 
 [Install]

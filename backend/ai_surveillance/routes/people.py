@@ -23,15 +23,17 @@ from sqlalchemy.orm import Session
 from ..captures import InsufficientStorage, check_free_space
 from ..credentials import CredentialError
 from ..db import AdminUser, Person, ReferenceFace, as_utc, new_id, utcnow
-from ..deps import AppState, confirm_password, current_user, get_db, get_state
-from ..gallery import (FACE_ENROLLED, PERSON_CREATED, PERSON_UPDATED, EnrollmentRejected, audit,
+from ..deps import AppState, admin, confirm_password, get_db, get_state, operator
+from ..gallery import (FACE_ENROLLED, PERSON_CREATED, PERSON_UPDATED, PROFILE_VIEWED, REFERENCE_IMAGE_VIEWED,
+                       EnrollmentRejected, audit,
                        delete_person, delete_reference_face, image_context, single_face)
 from ..inference_client import InferenceUnavailable
 from ..media import describe_os_error
 from ..recognition import embedder_id, is_embedder_missing, store_reference_embedding
 from .analysis import PASSTHROUGH_ERRORS, _check_headers, _read_upload, error
 
-router = APIRouter(prefix="/api/people", tags=["people"], dependencies=[Depends(current_user)])
+# Reading needs an operator (and is audited); every change needs an administrator.
+router = APIRouter(prefix="/api/people", tags=["people"], dependencies=[Depends(operator)])
 log = logging.getLogger(__name__)
 
 _ID = re.compile(r"^[a-f0-9]{32}$")
@@ -147,7 +149,7 @@ def list_people(active: bool | None = None, db: Session = Depends(get_db)) -> di
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
-def create_person(body: PersonCreate, db: Session = Depends(get_db), user: AdminUser = Depends(current_user)) -> dict:
+def create_person(body: PersonCreate, db: Session = Depends(get_db), user: AdminUser = Depends(admin)) -> dict:
     now = utcnow()
     person = Person(display_name=body.display_name, notes=body.notes, consent_date=body.consent_date,
                     consent_note=body.consent_note, created_by=user.username, created_at=now, updated_at=now)
@@ -160,15 +162,17 @@ def create_person(body: PersonCreate, db: Session = Depends(get_db), user: Admin
 
 
 @router.get("/{person_id}")
-def get_person(person_id: str, db: Session = Depends(get_db)) -> dict:
+def get_person(person_id: str, db: Session = Depends(get_db), user: AdminUser = Depends(operator)) -> dict:
     person = _get(db, person_id)
     faces = _faces(db, person.id)
+    audit(db, user.username, PROFILE_VIEWED, "person", person.id)
+    db.commit()
     return _person(person, len(faces), faces)
 
 
 @router.patch("/{person_id}")
 def update_person(person_id: str, body: PersonUpdate, db: Session = Depends(get_db),
-                  user: AdminUser = Depends(current_user)) -> dict:
+                  user: AdminUser = Depends(admin)) -> dict:
     person = _get(db, person_id)
     changed = []
     for name in sorted(body.model_fields_set):
@@ -190,7 +194,7 @@ def update_person(person_id: str, body: PersonUpdate, db: Session = Depends(get_
 
 @router.delete("/{person_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_person_route(person_id: str, body: PasswordConfirmation, request: Request, db: Session = Depends(get_db),
-                        user: AdminUser = Depends(current_user), state: AppState = Depends(get_state)) -> None:
+                        user: AdminUser = Depends(admin), state: AppState = Depends(get_state)) -> None:
     """Deletes the person and every reference image. Needs the signed-in user's password again."""
     person = _get(db, person_id)
     confirm_password(request, state, db, user, body.password, "person", person.id)
@@ -210,7 +214,7 @@ def delete_person_route(person_id: str, body: PasswordConfirmation, request: Req
 
 @router.post("/{person_id}/faces", status_code=status.HTTP_201_CREATED)
 async def enroll_face(person_id: str, request: Request, db: Session = Depends(get_db),
-                      user: AdminUser = Depends(current_user), state: AppState = Depends(get_state)):
+                      user: AdminUser = Depends(admin), state: AppState = Depends(get_state)):
     """Enroll an uploaded reference image (multipart field `file`: JPEG, PNG or WebP) with exactly one face."""
     settings = state.settings
     person = _get(db, person_id)
@@ -331,8 +335,11 @@ def _media_type(data: bytes) -> str:
 
 
 @router.get("/{person_id}/faces/{face_id}/image")
-def reference_image(person_id: str, face_id: str, db: Session = Depends(get_db), state: AppState = Depends(get_state)):
+def reference_image(person_id: str, face_id: str, db: Session = Depends(get_db), state: AppState = Depends(get_state),
+                    user: AdminUser = Depends(operator)):
     face = _get_face(db, _get(db, person_id), face_id)
+    audit(db, user.username, REFERENCE_IMAGE_VIEWED, "reference_face", face.id, f"person {person_id}")
+    db.commit()
     try:
         blob = state.gallery_store.path_for(face.image_file).read_bytes()
     except (ValueError, FileNotFoundError):
@@ -352,7 +359,7 @@ def reference_image(person_id: str, face_id: str, db: Session = Depends(get_db),
 
 @router.delete("/{person_id}/faces/{face_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_face_route(person_id: str, face_id: str, db: Session = Depends(get_db),
-                      user: AdminUser = Depends(current_user), state: AppState = Depends(get_state)) -> None:
+                      user: AdminUser = Depends(admin), state: AppState = Depends(get_state)) -> None:
     face = _get_face(db, _get(db, person_id), face_id)
     username = user.username
     db.close()

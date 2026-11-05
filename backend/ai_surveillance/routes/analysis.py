@@ -13,10 +13,10 @@ from fastapi.responses import JSONResponse
 from starlette.datastructures import UploadFile  # what Starlette's form parser returns
 from starlette.formparsers import MultiPartParser
 
-from ..deps import AppState, current_user, get_state
+from ..deps import AppState, get_state, operator
 from ..inference_client import InferenceUnavailable
 
-router = APIRouter(prefix="/api", tags=["analysis"], dependencies=[Depends(current_user)])
+router = APIRouter(prefix="/api", tags=["analysis"], dependencies=[Depends(operator)])
 log = logging.getLogger(__name__)
 
 # Error codes the inference service may return and that are safe to pass on.

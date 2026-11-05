@@ -7,6 +7,7 @@ needs time to flush the last recording segment and queues exports.
 
 import asyncio
 import logging
+import math
 import time
 from datetime import timedelta
 
@@ -111,19 +112,27 @@ async def run_clip_export(
     store: MediaStore,
     sessions: sessionmaker,
 ) -> None:
-    """Export [end_ts - duration, end_ts] from Frigate and store it locally."""
+    """Export [end_ts - duration, end_ts] from Frigate and store it locally.
+
+    Event footage (footage.py) sets the capture's clip_start/clip_end instead; then that range is
+    exported, after waiting only as long as its end is too recent to be flushed.
+    """
     with sessions() as db:
         capture = db.get(Capture, capture_id)
         if capture is None:
             return
         camera, seconds = capture.camera, capture.duration_seconds or settings.clip_default_seconds
+        start_ts = int(capture.clip_start) if capture.clip_start is not None else end_ts - seconds
+        if capture.clip_end is not None:
+            end_ts = int(math.ceil(capture.clip_end))
 
     error: str | None = None
     export_id: str | None = None
     file_name = f"{capture_id}.mp4"
     try:
-        await asyncio.sleep(settings.clip_settle_seconds)
-        export_id = await frigate.start_export(camera, end_ts - seconds, end_ts, name=f"capture-{capture_id}")
+        await asyncio.sleep(max(0.0, min(settings.clip_settle_seconds,
+                                         end_ts + settings.clip_settle_seconds - time.time())))
+        export_id = await frigate.start_export(camera, start_ts, end_ts, name=f"capture-{capture_id}")
         with sessions() as db:
             row = db.get(Capture, capture_id)
             row.frigate_export_id = export_id

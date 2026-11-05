@@ -8,11 +8,11 @@ or password.
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from ..deps import AppState, current_user, get_db, get_state
+from ..deps import AppState, admin, get_db, get_state
 from ..frigate_apply import ApplyError, apply, build_plan
 from ..frigate_secrets import FrigateSecrets
 
-router = APIRouter(prefix="/api/frigate", tags=["frigate"], dependencies=[Depends(current_user)])
+router = APIRouter(prefix="/api/frigate", tags=["frigate"], dependencies=[Depends(admin)])
 
 
 @router.post("/apply")

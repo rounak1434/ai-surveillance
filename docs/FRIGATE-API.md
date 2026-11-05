@@ -26,6 +26,15 @@ FastAPI routes are defined without `/api`; Frigate's nginx maps `/api/` to them.
 | `WS /live/mse/api/ws?src=<go2rtc stream>` | live view | nginx proxies to go2rtc `/api/ws`, GET only, behind its auth check | `nginx.conf` |
 | `POST /api/login` body `{"user","password"}` | only when `FRIGATE_URL` is port 8971 | 200 with empty body; JWT in cookie `frigate_token` (`auth.cookie_name` default). Later requests may send `Authorization: Bearer <jwt>`. 401 "Login failed". | `frigate/api/auth.py`, `frigate/config/auth.py` |
 
+## Added 2026-11-05, not source-checked
+These come from Frigate's documentation and earlier knowledge of its source. They were **not** checked against the v0.18.2 tag like the table above. Each one must be confirmed on the running instance (ACCEPTANCE-CHECKLIST.md).
+
+| Interface | Used by | Expected behaviour |
+|---|---|---|
+| MQTT `frigate/events` (topic prefix `mqtt.topic_prefix`) | gate lines, face-event wake-up (`mqtt_events.py`) | JSON `{"type": "new"\|"update"\|"end", "before": {...}, "after": {...}}`; `after` has `id`, `camera`, `label`, `frame_time`, `box` `[x_min, y_min, x_max, y_max]` in detect pixels. How often `update` is sent for a moving person is unknown. |
+| `GET /api/events/<id>/snapshot.jpg` for an event still in progress | the immediate gate check | Serves the tracked object's current best snapshot. |
+| `POST /api/export/<camera>/start/<ts>/end/<ts>` for past times | event footage | As for clips; 400 "No recordings found for time range" when the recording has expired or is missing. |
+
 ## Ports and authentication
 - **5000 (internal).** Every request is treated as user `anonymous` with role `admin`. The api uses this port over the private Docker network. It must never be published to the LAN.
 - **8971 (external).** Requires login, and roles are enforced. TLS uses Frigate's own certificate, so with `FRIGATE_URL=https://frigate:8971` set `FRIGATE_VERIFY_TLS=false`, or install the certificate.

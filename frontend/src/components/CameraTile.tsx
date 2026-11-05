@@ -4,7 +4,11 @@ import { LiveView } from "./LiveView";
 
 const CLIP_SECONDS = 10;
 
-export function CameraTile({ camera, onCaptured }: { camera: Camera; onCaptured: () => void }) {
+export function CameraTile({ camera, onCaptured, canCapture = true }: {
+  camera: Camera;
+  onCaptured: () => void;
+  canCapture?: boolean; // viewers watch only; snapshots and clips are footage (operators)
+}) {
   const [busy, setBusy] = useState<"snapshot" | "clip" | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -37,7 +41,7 @@ export function CameraTile({ camera, onCaptured }: { camera: Camera; onCaptured:
         </span>
       </header>
       <LiveView camera={camera.name} />
-      <div className="actions">
+      {canCapture && <div className="actions">
         <button onClick={() => run("snapshot")} disabled={busy !== null}>
           {busy === "snapshot" ? "Saving…" : "Snapshot"}
         </button>
@@ -45,7 +49,7 @@ export function CameraTile({ camera, onCaptured }: { camera: Camera; onCaptured:
           title={camera.recording ? undefined : "Recording is disabled for this camera"}>
           {busy === "clip" ? "Requesting…" : `Save ${CLIP_SECONDS} s clip`}
         </button>
-      </div>
+      </div>}
       {message && <p className="message" role="status">{message}</p>}
     </article>
   );

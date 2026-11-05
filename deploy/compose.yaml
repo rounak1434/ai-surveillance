@@ -62,6 +62,22 @@ services:
     depends_on:
       frigate-init:
         condition: service_completed_successfully
+      mosquitto:
+        condition: service_started
+    networks: [internal]
+
+  # MQTT broker for Frigate's event stream (frigate/events) to the api. Internal network only, no
+  # published port. Anonymous on that network: only the stack's own containers can reach it.
+  mosquitto:
+    image: eclipse-mosquitto:2.0.18
+    restart: unless-stopped
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "$$SYS/broker/uptime", "-C", "1", "-W", "5"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     networks: [internal]
 
   api:
@@ -104,6 +120,31 @@ services:
       # Trust X-Forwarded-For (the browser's address, used for the sign-in lockout) only from
       # the web proxy's fixed address on the edge network, not from any container.
       FORWARDED_ALLOW_IPS: ${WEB_EDGE_IP:-172.31.250.2}
+      # Real-time Frigate events (gate lines, immediate face events) from the mosquitto service.
+      MQTT_ENABLED: ${MQTT_ENABLED:-true}
+      MQTT_HOST: mosquitto
+      FACE_RECONCILE_SECONDS: ${FACE_RECONCILE_SECONDS:-60}
+      GATE_DEAD_ZONE: ${GATE_DEAD_ZONE:-0.02}
+      # Alarm output: simulation unless configured (docs/ALARM.md). Relay and webhook addresses must be
+      # IP addresses inside DEVICE_ALLOWED_NETWORKS.
+      ALARM_OUTPUT: ${ALARM_OUTPUT:-simulation}
+      ALARM_RELAY_ON_URL: ${ALARM_RELAY_ON_URL:-}
+      ALARM_RELAY_OFF_URL: ${ALARM_RELAY_OFF_URL:-}
+      ALARM_RELAY_METHOD: ${ALARM_RELAY_METHOD:-GET}
+      ALARM_RELAY_USERNAME: ${ALARM_RELAY_USERNAME:-}
+      ALARM_RELAY_PASSWORD: ${ALARM_RELAY_PASSWORD:-}
+      ALARM_DURATION_SECONDS: ${ALARM_DURATION_SECONDS:-10}
+      ALARM_COOLDOWN_SECONDS: ${ALARM_COOLDOWN_SECONDS:-60}
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+      ALERT_WEBHOOK_REVIEW: ${ALERT_WEBHOOK_REVIEW:-true}
+      # Event footage window and Frigate's recording retention (keep equal to record.continuous.days).
+      EVENT_CLIP_PRE_SECONDS: ${EVENT_CLIP_PRE_SECONDS:-5}
+      EVENT_CLIP_POST_SECONDS: ${EVENT_CLIP_POST_SECONDS:-5}
+      FRIGATE_RECORDING_DAYS: ${FRIGATE_RECORDING_DAYS:-3}
+      # Retention in days (0 keeps): docs/PRIVACY.md.
+      GATE_CROSSING_RETENTION_DAYS: ${GATE_CROSSING_RETENTION_DAYS:-90}
+      ALERT_RETENTION_DAYS: ${ALERT_RETENTION_DAYS:-90}
+      AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-365}
       TZ: ${TZ:-UTC}
     # A named volume, so the non-root api user owns it (a bind mount would
     # be created root-owned and the service could not write its database).
@@ -116,7 +157,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-    depends_on: [frigate, inference]
+    depends_on: [frigate, inference, mosquitto]
     # internal: Frigate and inference; edge: only the web proxy (see the networks section).
     networks: [internal, edge]
 

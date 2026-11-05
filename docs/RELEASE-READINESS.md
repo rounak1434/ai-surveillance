@@ -1,13 +1,13 @@
 # Release readiness
 
-Status of the whole product against the goals in [ARCHITECTURE.md](ARCHITECTURE.md) (milestones 1–4). Test evidence lives in [VERIFICATION.md](VERIFICATION.md); this page is the summary and the plan. Last updated 2026-10-30, base commit `b5b6a17`.
+Status of the whole product against the goals in [ARCHITECTURE.md](ARCHITECTURE.md) (milestones 1–4). Test evidence lives in [VERIFICATION.md](VERIFICATION.md); this page is the summary and the plan. Last updated 2026-11-05: gate monitoring features (roles, gate lines, MQTT, alerts and alarm, event footage, estimator status, privacy and retention, Ubuntu start-up) added in code; their new tests were written but not run, and nothing has run on the real stack. Manual checks: [ACCEPTANCE-CHECKLIST.md](ACCEPTANCE-CHECKLIST.md).
 
 Labels: **Done (verified)** tested here; **Done (tests only)** implemented, tested with mocks, never run on the real stack; **Partial**; **Missing**; **Blocked** needs the Ubuntu host, Docker, the GPU or the CP Plus devices.
 
 ## Feature matrix
 | Area | Status | Evidence / gap |
 |---|---|---|
-| Admin sign-in, sessions, lockout | Done (tests only) | `security.py`, `routes/auth.py`; `test_auth.py`, `session.test.tsx`. One admin account; no roles, no password change in the UI (CLI `create-admin` resets). |
+| Sign-in, sessions, lockout, roles | Done (code; new tests written, not run) | `security.py`, `routes/auth.py`, `routes/users.py`, migration `0006`: viewer/operator/admin enforced per route, password change, account management with last-admin protection, CLI recovery (`create-admin`, `list-users`). [PRIVACY.md](PRIVACY.md). |
 | Camera list, live view (MSE relay), still-frame fallback | Done (tests only) | `routes/cameras.py`, `routes/live.py` (Origin + session check); `test_rtsp_and_live.py`. Real go2rtc stream: Blocked. |
 | Snapshot and clip capture, captures gallery | Done (tests only) | `captures.py`, `routes/captures.py`; `test_cameras_and_captures.py` (30). Real Frigate export: Blocked. |
 | Capture deletion | Done (tests only) | `DELETE /api/captures/{id}` and a Delete button with confirmation in the gallery; `test_cameras_and_captures.py`, `app.test.tsx`. Frigate's export of each clip is deleted once our copy is stored (and when a clip is deleted), unless `CLIP_KEEP_FRIGATE_EXPORT=true`; mocked Frigate only. Retention does not yet remove Frigate exports whose cleanup failed. |
@@ -16,19 +16,19 @@ Labels: **Done (verified)** tested here; **Done (tests only)** implemented, test
 | RTSP probe (`ai-surveillance probe`) | Done (tests only) | `rtsp.py`; credentials masked. Needs ffprobe: Blocked here. |
 | Camera & NVR setup page (CRUD, encrypted passwords, SSRF guard, test) | Done (tests only) | `devices.py`, `routes/devices.py`, `netguard.py`; `test_devices.py`. "Apply to Frigate" feeds switched-on, connected devices to Frigate (ADR-0003, all 5 steps), tested with a simulated Frigate and static Compose checks only: **Partial until one real apply on the Ubuntu host**. |
 | Face detection (YuNet), crops, quality hints | Done (verified, dev PC) | Real model on the public-domain fixture; `inference/tests`. Accuracy on CP Plus footage: not measured. |
-| Face tracking across frames | Missing | Frigate tracks objects (person); no face tracks of our own. |
+| Person tracking and gate lines | Done (code; new tests written, not run) | Frigate's tracker ids and boxes over MQTT; `gate.py` crossing logic (dead zone, cooldown, frame-time ordering, unique per sequence), immediate face check per entry, link to the later face event; Gate page with line editor. [GATE.md](GATE.md). **MQTT update frequency on the real camera: unverified.** |
 | Gallery: people, consent records, enrollment, audit log (milestone 2) | Done (tests only) | ADR-0004 Phase 5, [GALLERY.md](GALLERY.md): enrollment from uploads only, exactly one face and a quality gate (real YuNet checked in WSL), images encrypted at rest, password re-confirmation for deleting a person, audit log; `test_gallery_api.py` (41). People page (Phase 7, vitest and a manual check against the real api and models). `db backup` does not include `media/gallery`. |
 | Face recognition and switch (milestone 2) | Done (tests only) | ADR-0004 Phase 6, [RECOGNITION.md](RECOGNITION.md): SFace embeddings (`/v1/embed`), matcher with `AUTHORIZED`/`UNRECOGNIZED`/`INCONCLUSIVE`/`SYSTEM_ERROR`/`NOT_MATCHED`, switch off by default with password confirmation; real models end to end on public-domain portraits (WSL). **Thresholds unmeasured on the real camera; no liveness check.** Switch on the People page (Phase 7). |
-| Age, expression, glasses, beard, mask estimates (milestone 3) | **Missing** | No models in the registry. Must be shown as fallible estimates only. |
-| Event history (milestone 3), Frigate MQTT events | **Partial** | Face events from Frigate person events are ingested and stored (ADR-0004 Phase 3, [FACE-EVENTS.md](FACE-EVENTS.md); mocked Frigate and real YuNet only); history API with filters, paging, images and delete (Phase 4); Face events page (Phase 7). No MQTT: Frigate's HTTP events API is polled instead. |
-| Alerts and alarm output (milestone 4) | **Missing** | No code; must be verified on the real hardware first. |
+| Age, gender presentation, expression, glasses, beard, mask estimates; liveness | Unavailable (by decision) | Contract, validation, storage and display done (`attributes.py`, `face_detections.attributes/liveness`); **no model installed**, so every estimate shows "unknown" and liveness "unavailable". Never used for decisions. |
+| Event history, Frigate MQTT events, event footage | Done (code; not run on the stack) | Face events as before; MQTT `frigate/events` wakes ingestion, HTTP poll kept as reconciliation (`mqtt_events.py`, mosquitto in compose); event footage export with pre/post seconds and expiry handling (`routes/footage.py`), opened by clicking the event frame. |
+| Alerts and alarm output | Done (code; simulation only) | `alarm.py`, `routes/alarm.py`, Alerts page: alerts for unauthorized and needs-review entries, LAN webhook, simulation (default) or HTTP relay (LAN IP only), silence, test, acknowledge, all audited. [ALARM.md](ALARM.md). **No relay or siren tested.** |
 | Database migrations | Done (verified) | Alembic baseline plus `0002_device_use_in_frigate`, `0003_face_events`, `0004_gallery`, `0005_recognition`; `test_migrations.py`. |
 | Backup, verify, restore, interruption handling, recovery copies | Done (verified: Windows + Linux/WSL) | `dbtools.py`; `test_dbtools.py` (79); 41-check drill. Power loss and real signals: not shown. |
 | Configuration and secrets | Done (tests only) | pydantic settings; `.env` gitignored; per-service env lists in compose; api ↔ inference bearer token (`INFERENCE_API_TOKEN`); `test_deploy_config.py`, `test_inference_token.py`. |
 | Health checks | Done (static checks only) | api (Compose), inference (Dockerfile), web (Caddy admin API `localhost:2019/config/`, Compose), Frigate (its own image's HEALTHCHECK, verified in the v0.18.2 Dockerfile; Compose sets none so it is not overridden); `test_every_long_running_service_has_a_health_check`. Never observed running (no Docker). |
 | Logging | Partial | Plain stdout logging; no rotation config beyond Docker's default. |
 | Start after reboot | Done (docs only) | `restart: unless-stopped` + systemd unit; Blocked: not run on the host. |
-| Desktop launcher | Not in scope | This product is a web app served by Docker; there is no desktop launcher in this repository. |
+| Desktop launcher, start after reboot | Done (scripts; not run on Ubuntu) | `deploy/desktop/install-desktop-shortcut.sh`, `deploy/install-service.sh`, unit with retry; [OPERATIONS.md](OPERATIONS.md). |
 | Packaging: Docker images, model download at build | Done (static checks only) | Dockerfiles, pinned `constraints.txt`; never built (no Docker here). |
 | Static analysis / CI | Done; the intermittent failure on GitHub runners was a timing-dependent test (`test_delete_refused_while_clip_is_pending`), fixed; failures are reported as annotations | `.github/workflows/ci.yml`: backend, inference (with the real model) and frontend jobs; `ruff` (pyflakes, pycodestyle errors, bugbear) for both Python packages; `tsc` in the frontend build. No Python type checker yet. |
 
@@ -85,7 +85,9 @@ Everything this development PC can run passes on Windows and Linux (WSL), three 
 | Deleted image files are unlinked, not overwritten; face-event frames are plain JPEGs | Mitigation: full-disk encryption on the host (SETUP) |
 | Frigate keeps its own snapshots (14 d) and recordings (3 d) outside our deletion | Documented; Frigate retention settings |
 | Backups keep deleted people until the backups are deleted | Documented (GALLERY operator procedure) |
-| One administrator account, no roles; image views not audited; audit log has no retention | Accepted for this milestone |
+| One administrator account, no roles; image views not audited; audit log has no retention | **Resolved in code (2026-11-05)**: roles, audited profile/image/footage access, `AUDIT_RETENTION_DAYS`; tests not run |
+| MQTT broker anonymous on the internal network (a container there could publish fake positions) | Accepted, documented in ARCHITECTURE.md; verdicts still need a real face in Frigate's frame |
+| Gate crossings depend on how often Frigate publishes position updates | Open until measured with real walks (ACCEPTANCE-CHECKLIST.md section 2) |
 | A tiny window remains between the enrollment re-check and its commit for the per-person limit (two uploads committing in the same instant) | Accepted: uploads that pass the re-check within milliseconds of each other could still exceed the limit; it only bounds storage, it is not a security control |
 | FFmpeg licence inside the Frigate and mediamtx images, transitive npm licences | Not verified (LICENSES.md) |
 | Any container on the internal network could forge `X-Forwarded-For` (uvicorn `--forwarded-allow-ips "*"`) | **Resolved** `5854d16`: trusted only from the web proxy's fixed address on a separate edge network; tested with uvicorn's middleware; never observed on Docker |

@@ -19,6 +19,7 @@ export type Capture = {
   duration_seconds: number | null;
   error: string | null;
   file_url: string | null;
+  source?: string | null; // "face_event:<id>" / "crossing:<id>" for event footage
 };
 
 export type Health = {
@@ -27,6 +28,7 @@ export type Health = {
   version: string;
   frigate: { reachable: boolean; version?: string; error?: string };
   inference?: { reachable: boolean; models_ready?: boolean; error?: string };
+  mqtt?: { enabled: boolean; connected: boolean };
 };
 
 export type DeviceKind = "ip_camera" | "nvr" | "synthetic";
@@ -184,6 +186,8 @@ export type FaceDetectionItem = {
   quality: Partial<FaceQuality>;
   crop_url: string | null;
   recognition: FaceRecognition | null; // null: stored before recognition existed
+  attributes?: Record<string, Estimate>; // fallible estimates, display only
+  liveness?: Liveness;
 };
 
 export type FaceEvent = {
@@ -281,6 +285,124 @@ export type AuditEntry = {
   detail: string | null;
 };
 
+// --- accounts, gate, alarm, footage, privacy --------------------------------------------
+
+export type Role = "viewer" | "operator" | "admin";
+export const ROLE_ORDER: Role[] = ["viewer", "operator", "admin"];
+// The server enforces roles; the UI only hides what a role cannot use.
+export const atLeast = (role: Role | undefined, required: Role) =>
+  ROLE_ORDER.indexOf(role ?? "viewer") >= ROLE_ORDER.indexOf(required);
+
+export type Me = { username: string; role?: Role };
+
+export type UserAccount = {
+  id: string;
+  username: string;
+  role: Role;
+  disabled: boolean;
+  created_at: string;
+  password_changed_at: string | null;
+};
+
+export type Point = { x: number; y: number }; // fractions of the frame, 0..1
+
+export type GateLine = {
+  id: string;
+  camera: string;
+  name: string;
+  p1: Point;
+  p2: Point;
+  in_side: "left" | "right";
+  record_exits: boolean;
+  enabled: boolean;
+  alarm_on_unauthorized: boolean;
+  cooldown_seconds: number;
+  updated_by: string;
+  updated_at: string;
+};
+
+export type GateLineInput = {
+  name: string;
+  x1: number; y1: number; x2: number; y2: number;
+  in_side: "left" | "right";
+  record_exits: boolean;
+  enabled: boolean;
+  alarm_on_unauthorized: boolean;
+  cooldown_seconds: number;
+  password: string;
+};
+
+export type GateStatus = {
+  tracking: boolean;
+  mqtt: { enabled: boolean; connected: boolean; last_message_at?: string | null; last_error?: string | null };
+  note: string | null;
+};
+
+export type Verdict = "pending" | "AUTHORIZED" | "UNAUTHORIZED" | "NEEDS_REVIEW" | "NOT_CHECKED";
+
+export type GateCrossing = {
+  id: string;
+  line_id: string;
+  camera: string;
+  frigate_event_id: string;
+  sequence: number;
+  direction: "in" | "out";
+  crossed_at: string;
+  point: Point;
+  verdict: Verdict;
+  reason: string | null;
+  checked_at: string | null;
+  // operators and administrators only
+  outcome?: Outcome | null;
+  similarity?: number | null;
+  person?: { id: string; display_name: string | null } | null;
+  face_event_id?: string | null;
+};
+
+export type Alert = {
+  id: string;
+  created_at: string;
+  kind: "unauthorized_entry" | "needs_review" | "alarm_test";
+  camera: string | null;
+  crossing_id: string | null;
+  detail: string | null;
+  status: "open" | "acknowledged";
+  alarm: "none" | "simulated" | "activated" | "failed" | "silenced" | "cooldown" | "disabled";
+  delivery: string | null;
+  acknowledged_by: string | null;
+  acknowledged_at: string | null;
+};
+
+export type AlarmStatus = {
+  output: "simulation" | "http_relay" | "none";
+  physical: boolean;
+  configured: boolean;
+  problem: string | null;
+  duration_seconds: number;
+  cooldown_seconds: number;
+  max_silence_minutes: number;
+  webhook: boolean;
+  last_error: string | null;
+  silenced_until: string | null;
+  open_alerts: number;
+};
+
+export type Estimate = { state: "estimated" | "unknown"; value: string | null; confidence: number | null; reason?: string };
+export type Liveness = { state: "checked" | "unavailable"; label?: string | null; score?: number | null; note: string };
+
+export type Capabilities = {
+  inference_reachable: boolean;
+  attributes: { installed: boolean; status: string; model: string | null; names: string[]; note: string };
+  liveness: { installed: boolean; status: string; model: string | null; note: string };
+};
+
+export type PrivacyOverview = {
+  retention_days: Record<string, number>;
+  counts: Record<string, number>;
+  encryption: { biometric_data: string; key_source: string; not_encrypted: string };
+  recognition_enabled: boolean;
+};
+
 export class ApiError extends Error {
   constructor(public status: number, message: string, public code?: string, public reasons?: string[]) {
     super(message);
@@ -361,12 +483,48 @@ const json = (method: string, body: unknown): RequestInit => ({ method, body: JS
 
 export const api = {
   health: () => request<Health>("/api/health"),
-  me: () => request<{ username: string }>("/api/auth/me"),
+  me: () => request<Me>("/api/auth/me"),
   login: (username: string, password: string) =>
-    request<{ username: string }>("/api/auth/login", {
+    request<Me>("/api/auth/login", {
       method: "POST",
       body: JSON.stringify({ username, password }),
     }),
+  changePassword: (current_password: string, new_password: string) =>
+    request<void>("/api/auth/password", json("POST", { current_password, new_password })),
+  users: () => request<{ items: UserAccount[]; roles: Role[] }>("/api/users"),
+  createUser: (username: string, role: Role, new_password: string, password: string) =>
+    request<UserAccount>("/api/users", json("POST", { username, role, new_password, password })),
+  updateUser: (id: string, change: { role?: Role; disabled?: boolean }, password: string) =>
+    request<UserAccount>(`/api/users/${encodeURIComponent(id)}`, json("PATCH", { ...change, password })),
+  resetUserPassword: (id: string, new_password: string, password: string) =>
+    request<void>(`/api/users/${encodeURIComponent(id)}/password`, json("POST", { new_password, password })),
+  deleteUser: (id: string, password: string) =>
+    request<void>(`/api/users/${encodeURIComponent(id)}`, json("DELETE", { password })),
+  gateLines: () => request<{ items: GateLine[]; status: GateStatus }>("/api/gate/lines"),
+  saveGateLine: (camera: string, input: GateLineInput) =>
+    request<GateLine>(`/api/gate/lines/${encodeURIComponent(camera)}`, json("PUT", input)),
+  deleteGateLine: (id: string, password: string) =>
+    request<void>(`/api/gate/lines/${encodeURIComponent(id)}`, json("DELETE", { password })),
+  crossings: (params: { camera?: string; verdict?: string; before?: string } = {}, limit = 50) =>
+    request<{ items: GateCrossing[] }>(`/api/gate/crossings${query({ ...params, limit: String(limit) })}`),
+  alerts: (status?: "open" | "acknowledged") => request<{ items: Alert[] }>(`/api/alerts${query({ status })}`),
+  acknowledgeAlert: (id: string) => request<Alert>(`/api/alerts/${encodeURIComponent(id)}/acknowledge`, { method: "POST" }),
+  alarm: () => request<AlarmStatus>("/api/alarm"),
+  silenceAlarm: (minutes: number) => request<AlarmStatus>("/api/alarm/silence", json("POST", { minutes })),
+  unsilenceAlarm: () => request<AlarmStatus>("/api/alarm/silence", { method: "DELETE" }),
+  testAlarm: (password: string) =>
+    request<{ alert: Alert | null; alarm: AlarmStatus }>("/api/alarm/test", json("POST", { password })),
+  // Starts (or returns) the export of the recording around the event; poll capture(id) until ready.
+  footage: (kind: "face-events" | "crossings", id: string) =>
+    request<Capture>(`/api/footage/${kind}/${encodeURIComponent(id)}`, { method: "POST" }),
+  capture: (id: string) => request<Capture>(`/api/captures/${encodeURIComponent(id)}`),
+  capabilities: () => request<Capabilities>("/api/capabilities"),
+  privacy: () => request<PrivacyOverview>("/api/privacy"),
+  runRetention: (password: string) =>
+    request<{ deleted: Record<string, number> }>("/api/privacy/retention/run", json("POST", { password })),
+  purgeEmbeddings: (password: string) =>
+    request<{ deleted_embeddings: number; recognition_switched_off: boolean }>(
+      "/api/privacy/embeddings/purge", json("POST", { password })),
   logout: () => request<void>("/api/auth/logout", { method: "POST" }),
   cameras: () => request<Camera[]>("/api/cameras"),
   snapshot: (camera: string) => request<Capture>(`${cam(camera)}/snapshot`, { method: "POST" }),

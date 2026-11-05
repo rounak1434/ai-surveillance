@@ -12,11 +12,13 @@
                                │ RTSP main + sub stream
  ┌──────────── Linux host (i7, 32 GB RAM, GTX 1650 4 GB) · docker compose ────────────┐
  │                                                                                    │
- │  frigate   0.18.2: go2rtc restream · detection · recordings · exports             │
+ │  frigate   0.18.2: go2rtc restream · detection · tracking · recordings · exports  │
  │     ▲      internal network only (port 5000); UI on 127.0.0.1:8971                 │
- │     │ HTTP + websocket                                                             │
- │  api       FastAPI: sign-in, camera list, live relay, snapshot/clip capture,       │
- │            capture index (SQLite) and media store                                  │
+ │     │ HTTP + websocket          frigate/events ──► mosquitto (MQTT, internal only) │
+ │     │                                                  │                         │
+ │  api       FastAPI: sign-in and roles, camera list, live relay, snapshot/clip and  │
+ │            event footage, face events, recognition, gate lines and crossings,     │
+ │            alerts and alarm output (simulation / LAN relay), audit, retention     │
  │     ▲                                                                              │
  │  inference face models (YuNet detection, SFace embeddings) behind adapters; internal│
  │            only; models verified at build time; keeps no images                    │
@@ -46,6 +48,10 @@
 - **Face events:** a background loop in the api polls Frigate's finished person events, takes each event's best frame (from the recording when possible), runs the face detector in the inference service and stores one face event per Frigate event, with frame and crops only when faces were found. `GET /api/face-events` and its image routes serve the history behind sign-in. Faces are identified only while recognition is switched on (below). Details in [FACE-EVENTS.md](FACE-EVENTS.md).
 - **Gallery:** `/api/people` holds authorized people with a consent record. `POST /api/people/<id>/faces` takes an uploaded image only, runs the face detector through the inference service and accepts it only with exactly one usable face; the image is stored AES-256-GCM encrypted under `media/gallery/`. Deleting a person needs the password again; changes go to `/api/audit-log`. Details in [GALLERY.md](GALLERY.md).
 - **Recognition:** off by default; `PUT /api/recognition` (password again) switches it. While on, each face-event poll embeds pending reference faces, then sends each new event's frame to `/v1/embed` (detection plus SFace embeddings) and matches every face against the active gallery's encrypted embeddings: `AUTHORIZED`, `UNRECOGNIZED`, `INCONCLUSIVE` or `SYSTEM_ERROR`. Event embeddings are discarded after matching. Details in [RECOGNITION.md](RECOGNITION.md).
+- **Real-time events and gate lines:** the api subscribes to Frigate's `frigate/events` over MQTT (`mosquitto` service). Person positions feed the gate tracker: one crossing per directional crossing of an administrator-drawn line, with a dead zone, a per-track cooldown and frame-time ordering against duplicates. Each entry is checked at once with the face pipeline, and finished events wake the face-event ingestion. The HTTP poll stays as a reconciliation pass. Details in [GATE.md](GATE.md).
+- **Alerts and alarm:** an unauthorized entry (one clear, non-matching face) raises an alert and, on lines that allow it, drives the alarm output. An uncertain result raises a review alert only. Output: simulation by default, or a LAN HTTP relay that must be configured in `.env`. Silence, test and acknowledgement are audited. Details in [ALARM.md](ALARM.md).
+- **Event footage:** `POST /api/footage/face-events/<id>` or `/crossings/<id>` exports the recording around the event (pre/post seconds) through the existing clip pipeline. It is played from `/api/captures/<id>/file` behind sign-in; expired or missing footage is reported as such.
+- **Accounts, privacy, retention:** viewer, operator and admin roles; password change and administrator recovery; access to profiles and footage audited; retention for every kind of history. Details in [PRIVACY.md](PRIVACY.md). Start-up, desktop shortcut and recovery: [OPERATIONS.md](OPERATIONS.md).
 - **Database migrations:** Alembic runs at api startup (`ai_surveillance/migrations`).
   - A database created before migrations existed is checked column by column against `0001_baseline`. Only an exact match is backed up and stamped; anything else stops startup unchanged.
   - Any existing SQLite file is backed up before a schema change.
@@ -55,7 +61,9 @@
 ## Security model
 | Concern | Measure |
 |---|---|
-| Operator access | Single admin account (more roles in a later milestone): argon2id, minimum 12-character password, per-client lockout after 5 failures, httpOnly + Secure + SameSite=Strict session cookie, server-side sessions stored as SHA-256 hashes. |
+| Operator access | Accounts with roles viewer < operator < admin, enforced on every route (`deps.require`). Sign-in uses argon2id, a minimum 12-character password and a per-client lockout after 5 failures. Sessions use an httpOnly + Secure + SameSite=Strict cookie and are stored server-side as SHA-256 hashes. Role changes and disabling revoke the account's sessions. The last active administrator cannot be removed. CLI recovery: `create-admin`. |
+| MQTT | The broker sits on the internal network only, with no published port, and is anonymous there. Any container on that network could publish fake positions, which could create false crossings. A verdict still needs a real face in Frigate's own frame. |
+| Alarm output | Simulation unless `ALARM_OUTPUT=http_relay` and the relay URLs are set in `.env`. URLs must be LAN IP literals inside `DEVICE_ALLOWED_NETWORKS`. The alarm fires only for clear unauthorized entries on lines that allow it, never for uncertain results or attribute estimates. |
 | Client address behind the proxy | Caddy ignores client-supplied `X-Forwarded-*` and sets them itself (its documented default). The api trusts `X-Forwarded-For` only from Caddy's fixed address on a separate `edge` network that only web and api join (`FORWARDED_ALLOW_IPS`), so the sign-in lockout counts per browser and no other container can choose its address. |
 | Engine exposure | Frigate port 5000 is unauthenticated, so it is never published. Port 8971 is bound to loopback. The browser never contacts Frigate. |
 | Camera credentials | Kept only in `deploy/.env` (gitignored, chmod 600) and passed only to the Frigate container. API responses never include stream URLs. Probe output masks `user:pass@`. |

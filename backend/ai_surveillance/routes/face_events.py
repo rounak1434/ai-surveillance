@@ -17,13 +17,16 @@ from fastapi.responses import FileResponse
 from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.orm import Session
 
+from ..attributes import present_attributes, present_liveness
 from ..db import AdminUser, FaceDetection, FaceEvent, Person, as_utc
-from ..deps import AppState, current_user, get_db, get_state
+from ..deps import AppState, admin, get_db, get_state, operator
 from ..face_detection import FACE_EVENT_STATUSES
 from ..face_events import delete_face_event
+from ..gallery import EVENT_IMAGE_VIEWED, audit
 from ..recognition import OUTCOMES, outcome_reason
 
-router = APIRouter(prefix="/api/face-events", tags=["face-events"], dependencies=[Depends(current_user)])
+# Face events name matched people and show faces: operators and administrators only.
+router = APIRouter(prefix="/api/face-events", tags=["face-events"], dependencies=[Depends(operator)])
 log = logging.getLogger(__name__)
 
 _ID = re.compile(r"^[a-f0-9]{32}$")
@@ -76,6 +79,9 @@ def _detection(event_id: str, d: FaceDetection, names: dict[str, str], state: st
         "quality": json.loads(d.quality),
         "crop_url": f"/api/face-events/{event_id}/detections/{d.id}/crop" if d.crop_file else None,
         "recognition": _recognition(d, names, state),
+        # Fallible model estimates, display only (attributes.py); "unknown" without a model.
+        "attributes": present_attributes(d.attributes),
+        "liveness": present_liveness(d.liveness),
     }
 
 
@@ -190,23 +196,31 @@ def get_face_event(event_id: str, db: Session = Depends(get_db)) -> dict:
 
 
 @router.get("/{event_id}/frame")
-def face_event_frame(event_id: str, db: Session = Depends(get_db), state: AppState = Depends(get_state)):
-    return _image(state, _get(db, event_id).frame_file)
+def face_event_frame(event_id: str, db: Session = Depends(get_db), state: AppState = Depends(get_state),
+                     user: AdminUser = Depends(operator)):
+    event = _get(db, event_id)
+    response = _image(state, event.frame_file)
+    audit(db, user.username, EVENT_IMAGE_VIEWED, "face_event", event.id, "frame")
+    db.commit()
+    return response
 
 
 @router.get("/{event_id}/detections/{detection_id}/crop")
 def face_detection_crop(event_id: str, detection_id: str, db: Session = Depends(get_db),
-                        state: AppState = Depends(get_state)):
+                        state: AppState = Depends(get_state), user: AdminUser = Depends(operator)):
     event = _get(db, event_id)
     detection = db.get(FaceDetection, detection_id) if _ID.match(detection_id) else None
     if detection is None or detection.event_id != event.id:  # a crop is only reachable through its own event
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Face detection not found")
-    return _image(state, detection.crop_file)
+    response = _image(state, detection.crop_file)
+    audit(db, user.username, EVENT_IMAGE_VIEWED, "face_event", event.id, f"crop {detection.id}")
+    db.commit()
+    return response
 
 
 @router.delete("/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_face_event_route(event_id: str, db: Session = Depends(get_db), state: AppState = Depends(get_state),
-                            user: AdminUser = Depends(current_user)) -> None:
+                            user: AdminUser = Depends(admin)) -> None:
     event = _get(db, event_id)
     username = user.username
     db.close()  # the deletion runs in its own session

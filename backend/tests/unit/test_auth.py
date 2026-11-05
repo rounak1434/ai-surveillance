@@ -18,7 +18,7 @@ def test_login_sets_hardened_cookie(client):
     cookie = resp.headers["set-cookie"].lower()
     assert "httponly" in cookie
     assert "samesite=strict" in cookie
-    assert client.get("/api/auth/me").json() == {"username": ADMIN_USER}
+    assert client.get("/api/auth/me").json() == {"username": ADMIN_USER, "role": "admin"}
 
 
 def test_wrong_password_rejected(client):

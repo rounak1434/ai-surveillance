@@ -3,6 +3,8 @@ import {
   api, FACE_EVENT_STATUSES, FaceDetectionItem, FaceEvent, FaceEventFilters, FaceEventStatus, Outcome, OUTCOMES,
   Person,
 } from "../../api";
+import { FootagePlayer } from "../events/FootagePlayer";
+import { ATTRIBUTE_LABEL } from "../events/labels";
 import {
   formatSimilarity, OUTCOME_CLASS, OUTCOME_HELP, OUTCOME_LABEL, pct, REASON_LABEL, recognitionStateLabel, STATUS_LABEL,
 } from "./labels";
@@ -26,9 +28,30 @@ function OutcomeBadge({ d }: { d: FaceDetectionItem }) {
   );
 }
 
+// Model estimates are guesses about appearance: always labelled as such, "unknown" without a model,
+// and never used for any decision.
+function Estimates({ d }: { d: FaceDetectionItem }) {
+  const attrs = d.attributes ?? {};
+  const known = Object.entries(attrs).filter(([, e]) => e.state === "estimated");
+  return (
+    <span className="muted small" data-testid="estimates">
+      <br />
+      Estimates (may be wrong; never used for access decisions):{" "}
+      {known.length === 0
+        ? "unknown (no estimation model installed)"
+        : known.map(([k, e]) => `${ATTRIBUTE_LABEL[k] ?? k}: ${e.value} (${Math.round((e.confidence ?? 0) * 100)}%)`).join(", ")}
+      <br />
+      Liveness: {d.liveness?.state === "checked"
+        ? `${d.liveness.label} (${Math.round((d.liveness.score ?? 0) * 100)}%, estimate)`
+        : "not checked: no anti-spoofing model installed"}
+    </span>
+  );
+}
+
 function EventDetail({ event, onClose, onDeleted }: { event: FaceEvent; onClose: () => void; onDeleted: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [footage, setFootage] = useState(false);
 
   const remove = async () => {
     if (!window.confirm("Delete this face event? Its frame and face crops are removed permanently.")) return;
@@ -56,7 +79,9 @@ function EventDetail({ event, onClose, onDeleted }: { event: FaceEvent; onClose:
         </p>
         {error && <p className="error" role="alert">{error}</p>}
         {event.frame_url && frame ? (
-          <div className="analysis-image" data-testid="event-frame">
+          <div className="analysis-image clickable" data-testid="event-frame" role="button" tabIndex={0}
+            title="Open the recording of this event" onClick={() => setFootage(true)}
+            onKeyDown={(e) => { if (e.key === "Enter") setFootage(true); }}>
             <img src={event.frame_url} alt={`Frame from ${event.camera}`} />
             {event.detections.map((d) => (
               <div key={d.id} className={`face-box face-${d.recognition?.outcome ?? "none"}`}
@@ -84,6 +109,7 @@ function EventDetail({ event, onClose, onDeleted }: { event: FaceEvent; onClose:
                     ` (accept ≥ ${d.recognition.thresholds.accept}, reject ≤ ${d.recognition.thresholds.reject})`}
                   <br />
                   detection score {d.score.toFixed(2)} · {d.box.w}×{d.box.h} px
+                  <Estimates d={d} />
                 </div>
               </li>
             ))}
@@ -94,10 +120,18 @@ function EventDetail({ event, onClose, onDeleted }: { event: FaceEvent; onClose:
           alike two faces look to the model; it is not proof of identity, and there is no liveness check.
         </p>
         <div className="actions">
+          <button className="secondary" onClick={() => setFootage(true)}>Open footage</button>
           <button className="secondary danger" onClick={remove} disabled={deleting}>Delete event</button>
           <button onClick={onClose}>Close</button>
         </div>
       </div>
+      {footage && (
+        // The player's backdrop lies inside this dialog's backdrop: keep its clicks from closing both.
+        <div onClick={(e) => e.stopPropagation()}>
+          <FootagePlayer kind="face-events" id={event.id} onClose={() => setFootage(false)}
+            title={`${event.camera} · ${new Date(event.started_at).toLocaleString()}`} />
+        </div>
+      )}
     </div>
   );
 }

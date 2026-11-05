@@ -11,7 +11,7 @@ from argon2.exceptions import InvalidHashError, VerificationError
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from .db import AdminUser, LoginSession, as_utc, utcnow
+from .db import ROLES, AdminUser, LoginSession, as_utc, utcnow
 
 _hasher = PasswordHasher()  # argon2id with the library's current recommended parameters
 
@@ -42,7 +42,16 @@ def authenticate(db: Session, username: str, password: str) -> AdminUser | None:
     if user is None:
         verify_password(_DUMMY_HASH, password)
         return None
-    return user if verify_password(user.password_hash, password) else None
+    # A disabled account is checked after the hash, so it takes as long as a wrong password.
+    return user if verify_password(user.password_hash, password) and not user.disabled else None
+
+
+def has_role(user: AdminUser, required: str) -> bool:
+    """Roles are ordered viewer < operator < admin; an unknown stored role has no rights."""
+    try:
+        return ROLES.index(user.role) >= ROLES.index(required)
+    except ValueError:
+        return False
 
 
 def _token_hash(token: str) -> str:
@@ -72,7 +81,8 @@ def user_for_token(db: Session, token: str | None) -> AdminUser | None:
         db.delete(row)
         db.commit()
         return None
-    return db.get(AdminUser, row.user_id)
+    user = db.get(AdminUser, row.user_id)
+    return None if user is None or user.disabled else user
 
 
 def revoke_session(db: Session, token: str | None) -> None:
@@ -81,9 +91,12 @@ def revoke_session(db: Session, token: str | None) -> None:
         db.commit()
 
 
-def revoke_user_sessions(db: Session, user_id: str) -> None:
-    """Sign a user out everywhere (used after a password reset)."""
-    db.execute(delete(LoginSession).where(LoginSession.user_id == user_id))
+def revoke_user_sessions(db: Session, user_id: str, keep_token: str | None = None) -> None:
+    """Sign a user out everywhere (used after a password reset), optionally except the current session."""
+    query = delete(LoginSession).where(LoginSession.user_id == user_id)
+    if keep_token:
+        query = query.where(LoginSession.token_hash != _token_hash(keep_token))
+    db.execute(query)
 
 
 def purge_expired_sessions(db: Session) -> int:

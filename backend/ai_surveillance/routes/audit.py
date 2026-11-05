@@ -14,9 +14,9 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from ..db import AuditEntry, as_utc
-from ..deps import current_user, get_db
+from ..deps import admin, get_db
 
-router = APIRouter(prefix="/api/audit-log", tags=["audit"], dependencies=[Depends(current_user)])
+router = APIRouter(prefix="/api/audit-log", tags=["audit"], dependencies=[Depends(admin)])
 
 _ID = re.compile(r"^[a-f0-9]{32}$")
 

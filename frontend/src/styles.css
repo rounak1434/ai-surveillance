@@ -201,6 +201,23 @@ button.danger-solid { background: var(--bad); }
   overflow-wrap: anywhere; }
 .facts dd { overflow-wrap: anywhere; }
 
+/* Gate, alerts, footage */
+.gate-frame { position: relative; line-height: 0; background: #000; border-radius: 8px; overflow: hidden; }
+.gate-frame img { width: 100%; display: block; }
+.gate-frame.drawing { cursor: crosshair; outline: 2px dashed var(--accent); }
+.gate-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.gate-line { stroke: #f59e0b; stroke-width: 3; }
+.gate-arrow { stroke: #22c55e; stroke-width: 3; }
+.gate-arrow-head { fill: #22c55e; }
+.gate-form { margin-top: 0.75rem; }
+.crossing-row, .alert-row { grid-template-columns: 1.3fr 1fr 1.2fr 2fr; }
+@media (max-width: 640px) {
+  .crossing-row, .alert-row { grid-template-columns: 1fr; }
+}
+.clickable { cursor: pointer; }
+.footage { width: min(960px, 100%); }
+.footage video { width: 100%; background: #000; border-radius: 8px; }
+
 .modal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.7); display: grid; place-items: center; padding: 16px; }
 .modal-body { background: var(--surface); padding: 1rem; border-radius: var(--radius); max-width: min(1100px, 100%); }
 .modal-body img, .modal-body video { max-width: 100%; max-height: 75vh; display: block; }

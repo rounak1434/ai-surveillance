@@ -16,12 +16,12 @@ from sqlalchemy.orm import Session
 
 from .. import recognition
 from ..db import AdminUser, Person, ReferenceFace, as_utc
-from ..deps import AppState, confirm_password, current_user, get_db, get_state
+from ..deps import AppState, admin, confirm_password, get_db, get_state, operator
 from ..gallery import RECOGNITION_DISABLED, RECOGNITION_ENABLED, audit
 from ..inference_client import InferenceUnavailable
 from .analysis import error
 
-router = APIRouter(prefix="/api/recognition", tags=["recognition"], dependencies=[Depends(current_user)])
+router = APIRouter(prefix="/api/recognition", tags=["recognition"], dependencies=[Depends(operator)])
 log = logging.getLogger(__name__)
 
 
@@ -70,7 +70,7 @@ async def get_recognition(db: Session = Depends(get_db), state: AppState = Depen
 
 @router.put("")
 async def set_recognition(body: SwitchRequest, request: Request, db: Session = Depends(get_db),
-                          user: AdminUser = Depends(current_user), state: AppState = Depends(get_state)):
+                          user: AdminUser = Depends(admin), state: AppState = Depends(get_state)):
     confirm_password(request, state, db, user, body.password, "setting", "recognition")
     embedder, status = await recognition.current_embedder(state.inference)
     gallery = None

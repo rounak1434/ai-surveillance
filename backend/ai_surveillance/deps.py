@@ -3,18 +3,19 @@
 import asyncio
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from .config import Settings
 from .credentials import CredentialCipher
-from .db import AdminUser, Database
+from .db import ROLE_ADMIN, ROLE_OPERATOR, ROLE_VIEWER, AdminUser, Database
 from .frigate_client import FrigateClient, FrigateError
 from .gallery import PASSWORD_CONFIRMATION_FAILED, audit
 from .inference_client import InferenceClient
 from .media import MediaStore
-from .security import SESSION_COOKIE, LoginThrottle, user_for_token, verify_password
+from .security import SESSION_COOKIE, LoginThrottle, has_role, user_for_token, verify_password
 
 CAMERA_CACHE_SECONDS = 30.0
 
@@ -34,6 +35,10 @@ class AppState:
     background: set[asyncio.Task] = field(default_factory=set)
     device_tests: dict[str, float] = field(default_factory=dict)  # device id -> last test time
     frigate_apply_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # one "Apply to Frigate" at a time
+    ingestor: Any = None  # face_events.Ingestor, when face events are enabled
+    alarm: Any = None  # alarm.AlarmService
+    gate: Any = None  # gate.GateService (needs MQTT)
+    mqtt: Any = None  # mqtt_events.MqttStatus, when MQTT is enabled
     _cameras: dict[str, dict] | None = None
     _cameras_at: float = 0.0
 
@@ -68,6 +73,22 @@ def current_user(request: Request, db: Session = Depends(get_db)) -> AdminUser:
     if user is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not signed in")
     return user
+
+
+def require(role: str):
+    """Dependency: a signed-in user with at least `role` (viewer < operator < admin); 403 otherwise."""
+
+    def dependency(user: AdminUser = Depends(current_user)) -> AdminUser:
+        if not has_role(user, role):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, f"This needs the {role} role")
+        return user
+
+    return dependency
+
+
+viewer = require(ROLE_VIEWER)
+operator = require(ROLE_OPERATOR)
+admin = require(ROLE_ADMIN)
 
 
 def confirm_password(request: Request, state: AppState, db: Session, user: AdminUser, password: str,

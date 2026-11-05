@@ -8,7 +8,11 @@
 # block below and docs/SETUP.md.
 
 mqtt:
-  enabled: false # event bus arrives in milestone 2
+  # Event stream for the api (gate lines, immediate face events): the mosquitto service in compose.
+  enabled: true
+  host: mosquitto
+  port: 1883
+  topic_prefix: frigate # must match MQTT_TOPIC_PREFIX of the api
 
 auth:
   enabled: true # applies to port 8971; the first admin password is printed in the logs on first start
