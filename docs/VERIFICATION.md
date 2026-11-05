@@ -383,6 +383,20 @@ Automated tests were **not run**, as the owner instructed. New tests are in `tes
 
 **Nothing was run** on Docker, Frigate, mosquitto, a relay, a siren, the NVR or a camera. Every behaviour above is "Done (code)" until [ACCEPTANCE-CHECKLIST.md](ACCEPTANCE-CHECKLIST.md) is carried out.
 
+## Gate and alert flow against the Frigate v0.18.2 source, 2026-11-05, base `7c02b98`
+The source was read at tag `v0.18.2` (commit `cfa08c5`): `comms/mqtt.py`, `config/mqtt.py`, `track/object_processing.py`, `track/tracked_object.py`, `camera/state.py`, `api/media.py`, `api/export.py` and `events/maintainer.py`. The findings are in [FRIGATE-API.md](FRIGATE-API.md), "MQTT and in-progress events".
+
+| Point | Result |
+|---|---|
+| Topic `<prefix>/events`, `type` new/update/end, `before`/`after` | Matches the code |
+| `after.id`, `camera`, `label`, `frame_time`, `box` in detect pixels | Matches. `id` is also the Event id, so the link from a crossing to its face event holds. |
+| QoS | **Doc corrected.** Frigate publishes at `mqtt.qos` (default 0), so delivery is at most once despite the QoS 1 subscription. |
+| Update rate | Now documented: about every 5–6 % of frame movement, plus timed and state-change updates. Not per frame. |
+| In-progress snapshot | **Code corrected.** It serves the tracked object's best frame, not the crossing frame. The entry check now takes the person's box from the analysed frame (`after.snapshot.box` or `after.box`, matched by frame time), and gives `NEEDS_REVIEW` `person_box_unknown` when neither matches. Before this, faces were filtered with the crossing frame's box on a different frame. |
+| Export for past times | Matches. 400 only when no segment overlaps; partial ranges are exported. |
+
+Checks: `compileall` OK, `ruff check backend` clean, `tsc --noEmit` OK. One unit test was added: `test_person_box_is_taken_from_the_frame_that_was_analysed`. Automated tests were **not run**, as the owner instructed. Nothing was observed on a running Frigate; ACCEPTANCE-CHECKLIST.md section 2a lists the steps for the Ubuntu host. The alarm stays in simulation, and no relay or siren was touched.
+
 ## To fill in on the Ubuntu host
 ```
 Date:

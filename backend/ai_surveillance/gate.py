@@ -21,7 +21,11 @@ Duplicate protection:
 
 Check: each entry ("in") is checked at once: the track's current best frame (Frigate's event
 snapshot, or the recording frame) goes through the same face detection and recognition as face
-events, and only the face inside the person's box counts. Verdicts:
+events, and only the face inside the person's box counts. While the event is in progress that
+best frame is the tracked object's thumbnail frame, usually not the crossing frame (Frigate
+0.18.2 `event_snapshot`, `TrackedObject.get_img_bytes`), so the person's box is taken from the
+frame that was actually analysed: the crossing message's `box` or its `snapshot.box`, matched by
+frame time. A frame matching neither needs review. Verdicts:
   AUTHORIZED     the face matched an active authorized person
   UNAUTHORIZED   one clear face (no quality warning) that is below the reject threshold against a
                  non-empty gallery
@@ -37,7 +41,7 @@ import asyncio
 import logging
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select
@@ -63,6 +67,7 @@ VERDICTS = frozenset({PENDING, AUTHORIZED, UNAUTHORIZED, NEEDS_REVIEW, NOT_CHECK
 IN, OUT = "in", "out"
 _CHECK_CONCURRENCY = 2
 _FACE_IN_BOX_MARGIN = 0.1  # a face centre may lie this fraction of the box size outside the person box
+_FRAME_TIME_TOLERANCE = 0.001  # seconds; frames are at least 1/30 s apart
 
 
 # --- geometry -------------------------------------------------------------------------------
@@ -126,6 +131,18 @@ def foot_point(box, width: float, height: float) -> tuple[float, float] | None:
     return min(max((x0 + x1) / 2 / width, 0.0), 1.0), min(max(y1 / height, 0.0), 1.0)
 
 
+def snapshot_box(after: dict, width: float, height: float) -> tuple[float, tuple[float, float, float, float]] | None:
+    """(frame time, normalised box) of the track's best frame so far: Frigate's `after.snapshot`
+    (the tracked object's thumbnail data), or None while it has none."""
+    snapshot = after.get("snapshot")
+    if not isinstance(snapshot, dict):
+        return None
+    frame_time, box = snapshot.get("frame_time"), snapshot.get("box")
+    if not isinstance(frame_time, int | float) or foot_point(box, width, height) is None:
+        return None
+    return float(frame_time), (box[0] / width, box[1] / height, box[2] / width, box[3] / height)
+
+
 # --- tracking -------------------------------------------------------------------------------
 
 @dataclass
@@ -144,7 +161,18 @@ class Crossing:
     direction: str
     frame_time: float
     point: tuple[float, float]
-    person_box: tuple[float, float, float, float]  # normalised x0, y0, x1, y1
+    person_box: tuple[float, float, float, float]  # normalised x0, y0, x1, y1, at frame_time
+    snapshot: tuple[float, tuple[float, float, float, float]] | None = None  # best frame's (time, box)
+
+    def box_at(self, frame_time: float | None) -> tuple[float, float, float, float] | None:
+        """The person's box in the frame taken at `frame_time`, if this crossing knows it."""
+        if frame_time is None:
+            return None
+        if abs(frame_time - self.frame_time) <= _FRAME_TIME_TOLERANCE:
+            return self.person_box
+        if self.snapshot is not None and abs(frame_time - self.snapshot[0]) <= _FRAME_TIME_TOLERANCE:
+            return self.snapshot[1]
+        return None
 
 
 class GateTracker:
@@ -270,6 +298,8 @@ class GateService:
             if point is not None:
                 person_box = (box[0] / size[0], box[1] / size[1], box[2] / size[0], box[3] / size[1])
                 crossing = self.tracker.update(line, track_id, float(frame_time), point, person_box)
+                if crossing is not None:
+                    crossing = replace(crossing, snapshot=snapshot_box(after, *size))
         if payload.get("type") == "end":
             self.tracker.end(track_id)
         self.tracker.expire()
@@ -362,7 +392,12 @@ class GateService:
         ingestor._match(result, True, gallery)
         if result.recognition_state != recognition.STATE_DONE:
             return NEEDS_REVIEW, recognition.REASON_UNAVAILABLE, None
-        faces = [f for f in result.faces if _face_in_person(f, result.frame_width, result.frame_height, c.person_box)]
+        person_box = c.box_at(result.frame_time)
+        if person_box is None:
+            # The analysed frame is neither the crossing frame nor the best frame the crossing
+            # message named (the best frame changed meanwhile): where the person is in it is unknown.
+            return NEEDS_REVIEW, "person_box_unknown", None
+        faces = [f for f in result.faces if _face_in_person(f, result.frame_width, result.frame_height, person_box)]
         if not faces:
             return NEEDS_REVIEW, "no_face_on_person", None
         if len(faces) > 1:

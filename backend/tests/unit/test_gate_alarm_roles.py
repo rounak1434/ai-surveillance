@@ -12,10 +12,10 @@ import pytest
 
 from ai_surveillance import alarm as alarm_mod
 from ai_surveillance.config import Settings
-from ai_surveillance.db import AdminUser, Alert, Database
+from ai_surveillance.db import AdminUser, Alert, Database, GateCrossing, GateLine
 from ai_surveillance.face_detection import DetectedFace
-from ai_surveillance.gate import (AUTHORIZED, IN, NEEDS_REVIEW, OUT, UNAUTHORIZED, GateTracker, Line, foot_point,
-                                  segments_intersect, side_of, verdict_for)
+from ai_surveillance.gate import (AUTHORIZED, IN, NEEDS_REVIEW, OUT, UNAUTHORIZED, Crossing, GateTracker, Line,
+                                  foot_point, segments_intersect, side_of, snapshot_box, verdict_for)
 from ai_surveillance.recognition import INCONCLUSIVE, UNRECOGNIZED, Match
 from ai_surveillance.security import hash_password
 
@@ -42,6 +42,21 @@ def test_step_must_cross_the_drawn_segment():
 def test_foot_point_is_the_bottom_centre_in_frame_fractions():
     assert foot_point([100, 100, 300, 700], 1000, 1000) == (0.2, 0.7)
     assert foot_point([1, 2, 3], 1000, 1000) is None
+
+
+def test_person_box_is_taken_from_the_frame_that_was_analysed():
+    # Frigate 0.18.2: an in-progress event's snapshot is the tracked object's best (thumbnail) frame,
+    # whose box is `after.snapshot.box`, not the crossing frame's `after.box`.
+    after = {"box": [500, 0, 700, 1000], "frame_time": 20.0,
+             "snapshot": {"frame_time": 18.5, "box": [100, 100, 300, 700]}}
+    snap = snapshot_box(after, 1000, 1000)
+    assert snap == (18.5, (0.1, 0.1, 0.3, 0.7))
+    c = Crossing(LINE, "t1", IN, 20.0, (0.6, 1.0), (0.5, 0.0, 0.7, 1.0), snap)
+    assert c.box_at(20.0) == (0.5, 0.0, 0.7, 1.0)
+    assert c.box_at(18.5) == (0.1, 0.1, 0.3, 0.7)
+    assert c.box_at(19.0) is None  # the best frame changed after the message: position unknown
+    assert c.box_at(None) is None
+    assert snapshot_box({"snapshot": None}, 1000, 1000) is None
 
 
 def _walk(tracker, xs, track="t1", start=1.0, line=LINE):
@@ -142,13 +157,25 @@ def test_relay_is_switched_and_cooldown_and_silence_hold_it(settings):
 
 
 def test_needs_review_raises_an_alert_but_never_the_alarm(settings):
+    from datetime import UTC, datetime
     calls = []
     service, db = _service(settings, lambda r: calls.append(r) or httpx.Response(200))
     line = Line("l" * 32, "entrance", 0.5, 0.1, 0.5, 0.9, "right", True, True, 10)  # alarm switched on
-    asyncio.run(service.on_crossing("c" * 32, line, NEEDS_REVIEW, "several_faces"))
+    crossing_id = "c" * 32
+    with db.sessionmaker() as s:
+        s.add(GateLine(id=line.id, camera=line.camera, name="test", x1=line.x1, y1=line.y1, x2=line.x2, y2=line.y2,
+                       in_side=line.in_side, record_exits=line.record_exits, enabled=True,
+                       alarm_on_unauthorized=line.alarm_on_unauthorized, cooldown_seconds=line.cooldown_seconds,
+                       updated_by="test"))
+        s.flush()
+        s.add(GateCrossing(id=crossing_id, line_id=line.id, camera=line.camera, frigate_event_id="f" * 30,
+                           sequence=1, direction=IN, crossed_at=datetime.now(UTC), frame_time=1.0,
+                           point_x=0.4, point_y=0.5, verdict=NEEDS_REVIEW, reason="several_faces"))
+        s.commit()
+    asyncio.run(service.on_crossing(crossing_id, line, NEEDS_REVIEW, "several_faces"))
     with db.sessionmaker() as s:
         alert = s.query(Alert).one()
-    assert alert.kind == "needs_review" and alert.alarm == alarm_mod.NONE
+    assert alert.kind == "needs_review" and alert.crossing_id == crossing_id and alert.alarm == alarm_mod.NONE
 
 
 # --- roles and accounts ---------------------------------------------------------------------

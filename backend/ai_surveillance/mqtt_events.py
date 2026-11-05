@@ -2,7 +2,9 @@
 
 Frigate publishes every tracked object's lifecycle on `<prefix>/events` as JSON
 {"type": "new" | "update" | "end", "before": {...}, "after": {...}}; `after` carries the stable
-event id (the track id), camera, label, frame_time and box. This module subscribes (QoS 1) and
+event id (the track id), camera, label, frame_time, box and snapshot (checked against the v0.18.2
+source, docs/FRIGATE-API.md). Frigate publishes at its mqtt.qos (default 0), so the QoS 1
+subscription still gets each message at most once. This module subscribes and
 - hands each person message to the gate service (gate.py), which counts line crossings;
 - wakes the face-event ingestion shortly after a person event ends, so face events (and the gate
   crossing's link to them) appear within seconds instead of at the next poll.

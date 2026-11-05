@@ -4,7 +4,8 @@
 An administrator draws a line on a camera's still frame (Gate page) and picks the side that counts as **in**. Every person Frigate tracks is followed across frames. One **crossing** is stored each time the person moves from one side of the line to the other. Entries are checked against the authorized people straight away. Exits are recorded too, if the line is set to, but they are not checked.
 
 ## How tracking works (`gate.py`, `mqtt_events.py`)
-- **Tracks and positions.** Frigate's tracker gives each person a stable id (its event id). On MQTT topic `frigate/events`, Frigate publishes `new`, `update` and `end` messages for that track, each with the person's `box` in detect-stream pixels and the `frame_time`. The api subscribes with QoS 1.
+- **Tracks and positions.** Frigate's tracker gives each person a stable id (its event id). On MQTT topic `frigate/events`, Frigate publishes `new`, `update` and `end` messages for that track. Each one carries the person's `box` in detect-stream pixels, the `frame_time`, and the box and time of the best frame so far (`snapshot`). Frigate publishes at its `mqtt.qos`, which defaults to 0. The api's QoS 1 subscription therefore still delivers each message at most once.
+- **How often.** Frigate 0.18.2 sends an `update` when the person's bottom centre has moved about 5–6 % of the frame, or when zones or the stationary state change. It also sends one at least every 5 s while the best frame improves (1 s for a person large enough for face recognition). Messages are not sent per frame. Draw the line so that it extends beyond the walkway on both ends by more than one such step; otherwise a person who changes side beyond the end of the line is not counted.
 - **The person's position** is the bottom centre of the box (where the feet are), as a fraction of the frame. The line is stored as fractions too, so it fits every stream resolution.
 - **A crossing** counts only when both of these hold:
   - the position changes sides;
@@ -18,8 +19,8 @@ An administrator draws a line on a camera's still frame (Gate page) and picks th
 
 ## The check of an entry
 While recognition is switched on, an entry is checked as follows:
-1. The api takes the track's current best frame from Frigate (`/api/events/<id>/snapshot.jpg`, or the recording frame) and runs the same detector and matcher as for face events.
-2. Only a face whose centre lies inside the person's box counts.
+1. The api takes the track's current best frame from Frigate (`/api/events/<id>/snapshot.jpg`, or the recording frame at the same time) and runs the same detector and matcher as for face events. While the person is still tracked, Frigate serves the best frame so far, which is usually not the crossing frame.
+2. Only a face whose centre lies inside the person's box **in that frame** counts. The box is the crossing message's `box` when the frame is the crossing frame, or its `snapshot.box` when it is the best frame. If Frigate's best frame changed after the message, the box is unknown and the crossing is `NEEDS_REVIEW` (`person_box_unknown`).
 
 | Verdict | When |
 |---|---|
@@ -50,7 +51,9 @@ When Frigate's face event for the same track is stored later, the crossing is li
   3. Optionally switch on "Alarm on unauthorized entry".
   4. Save; this needs your password.
 
-## Not verified (needs the real stack)
-- **Message frequency.** How often Frigate 0.18.2 publishes `update` messages for a walking person on this camera is not known. If updates are sparse, a fast walker can be first seen beyond the line's end, and then no crossing is counted. Measure this with real walks (acceptance checklist).
-- **In-progress snapshots.** That `/api/events/<id>/snapshot.jpg` serves a snapshot for an event that is still in progress is expected from Frigate's source, but has not been observed.
-- **Payload shape.** The MQTT payload shape (`after.box`, `after.frame_time`) comes from Frigate's documentation. It has not been checked against the v0.18.2 source in this repository's FRIGATE-API.md audit.
+## Verified from source, not yet observed (needs the real stack)
+The topic, payload fields, update rule, in-progress snapshot and export behaviour were checked against the Frigate v0.18.2 source on 2026-11-05 (FRIGATE-API.md, "MQTT and in-progress events"). Nothing has been observed on a running Frigate, camera or Ubuntu host. ACCEPTANCE-CHECKLIST.md section 2a covers that. Still unknown until then:
+- **The real update rate** on this camera with real walking speeds, and so how often crossings are missed.
+- **How often `person_box_unknown` occurs**, which depends on how often Frigate's best frame changes between a message and the check.
+- **Messages lost** during a broker or network hiccup, since delivery is QoS 0.
+- **Recognition accuracy** on in-progress best frames.

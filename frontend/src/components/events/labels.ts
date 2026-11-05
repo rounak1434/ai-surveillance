@@ -23,6 +23,7 @@ export const GATE_REASON: Record<string, string> = {
   check_failed: "the check could not run (Frigate or the AI service did not answer)",
   no_face: "no face was visible",
   no_face_on_person: "no face inside the person's box",
+  person_box_unknown: "the person's position in the checked frame is unknown",
   several_faces: "several faces: cannot tell which one crossed",
   face_too_small: "the face was too small to compare",
   face_touches_edge: "the face was cut off at the frame edge",

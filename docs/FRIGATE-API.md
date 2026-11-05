@@ -26,14 +26,17 @@ FastAPI routes are defined without `/api`; Frigate's nginx maps `/api/` to them.
 | `WS /live/mse/api/ws?src=<go2rtc stream>` | live view | nginx proxies to go2rtc `/api/ws`, GET only, behind its auth check | `nginx.conf` |
 | `POST /api/login` body `{"user","password"}` | only when `FRIGATE_URL` is port 8971 | 200 with empty body; JWT in cookie `frigate_token` (`auth.cookie_name` default). Later requests may send `Authorization: Bearer <jwt>`. 401 "Login failed". | `frigate/api/auth.py`, `frigate/config/auth.py` |
 
-## Added 2026-11-05, not source-checked
-These come from Frigate's documentation and earlier knowledge of its source. They were **not** checked against the v0.18.2 tag like the table above. Each one must be confirmed on the running instance (ACCEPTANCE-CHECKLIST.md).
+## MQTT and in-progress events (source-checked 2026-11-05)
+These were checked against the `v0.18.2` tag (commit `cfa08c56b23d23280c3d0a218e5a43182c97445b`), with the same meaning of "source-checked" as above. They have not been observed on a running instance; ACCEPTANCE-CHECKLIST.md section 2a does that.
 
-| Interface | Used by | Expected behaviour |
-|---|---|---|
-| MQTT `frigate/events` (topic prefix `mqtt.topic_prefix`) | gate lines, face-event wake-up (`mqtt_events.py`) | JSON `{"type": "new"\|"update"\|"end", "before": {...}, "after": {...}}`; `after` has `id`, `camera`, `label`, `frame_time`, `box` `[x_min, y_min, x_max, y_max]` in detect pixels. How often `update` is sent for a moving person is unknown. |
-| `GET /api/events/<id>/snapshot.jpg` for an event still in progress | the immediate gate check | Serves the tracked object's current best snapshot. |
-| `POST /api/export/<camera>/start/<ts>/end/<ts>` for past times | event footage | As for clips; 400 "No recordings found for time range" when the recording has expired or is missing. |
+| Interface | Used by | Source-checked behaviour | Source |
+|---|---|---|---|
+| MQTT topic `<mqtt.topic_prefix>/events` (default prefix `frigate`) | gate lines, face-event wake-up (`mqtt_events.py`) | Published with `retain=False` at QoS **`mqtt.qos`, default 0**. A subscription at QoS 1 therefore still receives at most once; a message lost while the api is disconnected is not redelivered. | `frigate/comms/mqtt.py` `publish`; `frigate/config/mqtt.py` |
+| Message body | same | JSON `{"before": <previous>, "after": <current>, "type": ...}`. `type` is `"new"` for the first message after the object stops being a false positive, then `"update"`, and `"end"` when the track ends. No `end` is sent for a track that stayed a false positive. | `frigate/track/object_processing.py` `update`, `end` |
+| `after` fields used | same | `id` (also the Event id: the face event and the crossing share it), `camera`, `label`, `frame_time` (the frame of the latest detection), `box` `[x_min, y_min, x_max, y_max]` in **detect-frame pixels**, `snapshot`: the best frame so far, `{frame_time, box, …}` or `null`. Also `false_positive`, `start_time`, `end_time`, `path_data`, `stationary`, … | `frigate/track/tracked_object.py` `to_dict`, `update`; `frigate/events/maintainer.py` (`Event.id: event_data["id"]`) |
+| When `update` is sent | gate tracking | Only for a true-positive object, on the first of: <br>- the bottom centre moves ≥ 5 % of the frame diagonal (normalised; about 5.7 % for 16:9); <br>- the position-change count, zones, a new attribute or stationary/active changes; <br>- 60 s without an update; <br>- the best frame improved and more than 5 s passed since the last message (1 s for a person large enough for face recognition without a sub-label). <br>A walking person is therefore seen about every 5–6 % of frame movement. | `frigate/camera/state.py` (`publish_threshold`), `frigate/track/tracked_object.py` `update` |
+| `GET /api/events/<id>/snapshot.jpg` while the event is in progress | the immediate gate check | When no finished Event row exists, it serves the tracked object's **best (thumbnail) frame**, not the latest frame. `X-Frame-Time` is that frame's time, equal to `after.snapshot.frame_time`. `Cache-Control: no-store`. It returns 404 "Live frame not available" when that frame has left Frigate's frame cache, and 404 "Ongoing event not found" for an unknown id. | `frigate/api/media.py` `event_snapshot`; `TrackedObject.get_img_bytes` |
+| `POST /api/export/<camera>/start/<ts>/end/<ts>` for past times | event footage | As for clips. The 400 "No recordings found for time range" is returned only when **no** recording segment overlaps the range. A partly covered range is exported with what exists. | `frigate/api/export.py` `export_recording`, `_validate_export_source` |
 
 ## Ports and authentication
 - **5000 (internal).** Every request is treated as user `anonymous` with role `admin`. The api uses this port over the private Docker network. It must never be published to the LAN.
