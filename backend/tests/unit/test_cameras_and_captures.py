@@ -188,8 +188,11 @@ def test_clip_rejected_when_no_recordings(signed_in, frigate):
     )
     capture = _wait_for(signed_in, signed_in.post("/api/cameras/entrance/clip", json={}).json()["id"])
     assert capture["status"] == "failed"
-    assert "No recordings found for time range" in capture["error"]
     assert capture["file_url"] is None
+    # The capture has no reason code; the API words Frigate's "No recordings found" for operators
+    # (routes/captures.py _error). The leading phrase is the one ACCEPTANCE-CHECKLIST.md documents.
+    assert capture["error"].startswith("No recording covers this time")
+    assert "No recordings found" not in capture["error"]
 
 
 def test_clip_times_out(signed_in, frigate, settings):

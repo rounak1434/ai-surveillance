@@ -228,6 +228,90 @@ def test_the_trusted_address_fits_the_edge_subnet_and_stays_out_of_device_tests(
     assert not any(subnet.overlaps(ipaddress.ip_network(n)) for n in _env_example()["DEVICE_ALLOWED_NETWORKS"].split(","))
 
 
+_EDGE_VARIABLES = ("EDGE_SUBNET", "WEB_EDGE_IP", "EDGE_IP_RANGE", "EDGE_GATEWAY")
+_CUSTOM_EDGE = {"EDGE_SUBNET": "172.30.99.0/29", "WEB_EDGE_IP": "172.30.99.2",
+                "EDGE_IP_RANGE": "172.30.99.4/30", "EDGE_GATEWAY": "172.30.99.1"}
+
+
+def _substitute(value: str, env: dict[str, str]) -> str:
+    """Compose's ${VAR:-default}: the value from .env when set, else the default."""
+    match = re.fullmatch(r"\$\{([A-Z_]+):-([^}]+)\}", value)
+    assert match, value
+    return env.get(match.group(1), match.group(2))
+
+
+def _edge_problems(compose: dict, env: dict[str, str]) -> list[str]:
+    """What Docker would refuse, or what would let the api take the proxy's address, for these settings."""
+    import ipaddress
+
+    ipam = compose["networks"]["edge"]["ipam"]["config"][0]
+    subnet = ipaddress.ip_network(_substitute(ipam["subnet"], env))
+    ip_range = ipaddress.ip_network(_substitute(ipam["ip_range"], env))
+    gateway = ipaddress.ip_address(_substitute(ipam["gateway"], env))
+    web = ipaddress.ip_address(_substitute(compose["services"]["web"]["networks"]["edge"]["ipv4_address"], env))
+    trusted = ipaddress.ip_address(_substitute(compose["services"]["api"]["environment"]["FORWARDED_ALLOW_IPS"], env))
+    usable = set(subnet.hosts())
+    problems = []
+    if not ip_range.subnet_of(subnet):
+        problems.append("ip_range outside the subnet")
+    if gateway not in usable:
+        problems.append("gateway is not a usable address of the subnet")
+    if web not in usable:
+        problems.append("web address is not a usable address of the subnet")
+    if web == gateway:
+        problems.append("web address is the gateway")
+    if web in ip_range:
+        problems.append("web address lies in the dynamic range")
+    if gateway in ip_range:
+        problems.append("gateway lies in the dynamic range")
+    if not (set(ip_range) & usable) - {web, gateway}:
+        problems.append("no dynamic address left for the api")
+    if trusted != web:
+        problems.append("the api trusts another address than the proxy's")
+    allowed = _substitute(compose["services"]["api"]["environment"]["DEVICE_ALLOWED_NETWORKS"], env)
+    if any(subnet.overlaps(ipaddress.ip_network(n)) for n in allowed.split(",")):
+        problems.append("subnet overlaps DEVICE_ALLOWED_NETWORKS")
+    return problems
+
+
+def test_edge_network_reserves_the_proxy_address_and_the_gateway(compose):
+    ipam = compose["networks"]["edge"]["ipam"]["config"][0]
+    assert ipam == {"subnet": "${EDGE_SUBNET:-172.31.250.0/29}", "ip_range": "${EDGE_IP_RANGE:-172.31.250.4/30}",
+                    "gateway": "${EDGE_GATEWAY:-172.31.250.1}"}
+    assert _edge_problems(compose, {}) == []
+
+
+@pytest.mark.parametrize("env", [
+    _CUSTOM_EDGE,  # the example in .env.example
+    {"EDGE_SUBNET": "172.31.251.0/29", "WEB_EDGE_IP": "172.31.251.2",  # the example in TROUBLESHOOTING.md
+     "EDGE_IP_RANGE": "172.31.251.4/30", "EDGE_GATEWAY": "172.31.251.1"},
+])
+def test_matching_custom_edge_settings_are_valid(compose, env):
+    assert _edge_problems(compose, env) == []
+
+
+@pytest.mark.parametrize("override, problem", [
+    # Changing only the subnet leaves the other defaults outside it.
+    ({"EDGE_SUBNET": "172.30.99.0/29"}, "ip_range outside the subnet"),
+    ({**_CUSTOM_EDGE, "WEB_EDGE_IP": "172.30.99.5"}, "web address lies in the dynamic range"),
+    ({**_CUSTOM_EDGE, "EDGE_GATEWAY": "172.30.99.2"}, "web address is the gateway"),
+    ({**_CUSTOM_EDGE, "EDGE_IP_RANGE": "172.30.99.0/29"}, "web address lies in the dynamic range"),
+    ({**_CUSTOM_EDGE, "EDGE_GATEWAY": "172.30.99.9"}, "gateway is not a usable address of the subnet"),
+])
+def test_mismatched_custom_edge_settings_are_caught(compose, override, problem):
+    assert problem in _edge_problems(compose, override)
+
+
+def test_env_example_documents_every_edge_variable_with_the_compose_defaults(compose):
+    commented = dict(re.findall(r"^# ([A-Z_]+)=(\S+)$", (DEPLOY / ".env.example").read_text(), re.M))
+    ipam = compose["networks"]["edge"]["ipam"]["config"][0]
+    defaults = {"EDGE_SUBNET": _default(ipam["subnet"]), "EDGE_IP_RANGE": _default(ipam["ip_range"]),
+                "EDGE_GATEWAY": _default(ipam["gateway"]),
+                "WEB_EDGE_IP": _default(compose["services"]["web"]["networks"]["edge"]["ipv4_address"])}
+    assert {k: commented.get(k) for k in _EDGE_VARIABLES} == defaults
+    assert not set(_EDGE_VARIABLES) & _env_example().keys(), "left commented out, so the compose defaults apply"
+
+
 def test_every_long_running_service_has_a_health_check(compose):
     services = compose["services"]
     assert "healthcheck" in services["api"]
@@ -237,7 +321,9 @@ def test_every_long_running_service_has_a_health_check(compose):
     nvidia = yaml.safe_load((DEPLOY / "compose.nvidia.yaml").read_text())
     assert "healthcheck" not in nvidia["services"]["frigate"]
     web = services["web"]["healthcheck"]["test"]
-    assert web == ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:2019/config/"]
+    assert web == ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+    # "localhost" may resolve to ::1 inside the container, where Caddy's admin API need not listen.
+    assert not any("localhost" in part for part in web)
     caddyfile = (DEPLOY / "caddy" / "Caddyfile").read_text()
     assert not re.search(r"^\s*admin\s+off", caddyfile, re.M), "the web health check needs Caddy's admin API"
     assert re.search(r"^FROM caddy:2\.8\.4-alpine$", (ROOT / "frontend" / "Dockerfile").read_text(), re.M)

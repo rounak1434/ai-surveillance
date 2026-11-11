@@ -192,8 +192,10 @@ services:
     # Caddy's admin API (documented default address localhost:2019; caddy:2.8.4-alpine is built on
     # alpine:3.20, which has BusyBox wget). Shows that Caddy runs with its config loaded; it does not
     # check the site's certificate or the api behind it (the api has its own health check).
+    # 127.0.0.1, not "localhost": inside the container "localhost" can resolve to ::1 first, where
+    # the admin API may not listen, and the check would then fail although Caddy is up.
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:2019/config/"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -218,12 +220,22 @@ networks:
   # web <-> api only. A fixed subnet is needed so the web proxy can have a fixed address
   # (ipv4_address) that the api trusts for X-Forwarded-For; no other container joins it.
   # It lies in 172.16.0.0/12, which DEVICE_ALLOWED_NETWORKS leaves out, so device tests can never
-  # reach it. If Docker reports "Pool overlaps with other one on this network", set EDGE_SUBNET and
-  # WEB_EDGE_IP in .env to a free range (the address must be inside the subnet).
+  # reach it.
+  # Addresses in the default 172.31.250.0/29:
+  #   .1      gateway (EDGE_GATEWAY), set explicitly so Docker cannot pick another address
+  #   .2      web proxy (WEB_EDGE_IP), fixed
+  #   .4-.6   dynamic addresses (EDGE_IP_RANGE 172.31.250.4/30) for the api. Docker hands out
+  #           dynamic addresses only from this range, so the api can never take the proxy's
+  #           address, whichever container starts first.
+  # If Docker reports "Pool overlaps with other one on this network", set all four variables in
+  # .env together (see .env.example): WEB_EDGE_IP and EDGE_GATEWAY inside EDGE_SUBNET, EDGE_IP_RANGE
+  # inside EDGE_SUBNET, and neither address inside EDGE_IP_RANGE.
   edge:
     ipam:
       config:
         - subnet: ${EDGE_SUBNET:-172.31.250.0/29}
+          ip_range: ${EDGE_IP_RANGE:-172.31.250.4/30}
+          gateway: ${EDGE_GATEWAY:-172.31.250.1}
 
 volumes:
   api-data: {}

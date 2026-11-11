@@ -6,7 +6,7 @@ cd ~/ai-surveillance/deploy && bash doctor.sh
 ```
 
 ## Docker and startup errors
-- **`Pool overlaps with other one on this network`** or **`invalid pool request`** when the stack starts: the web↔api `edge` network uses `172.31.250.0/29` by default and something on this host already uses that range. Set a free range in `.env`, for example `EDGE_SUBNET=172.31.251.0/29` and `WEB_EDGE_IP=172.31.251.2` (the address must be inside the subnet and not its first address), then `docker compose up -d`.
+- **`Pool overlaps with other one on this network`** or **`invalid pool request`** when the stack starts: the web↔api `edge` network uses `172.31.250.0/29` by default and something on this host already uses that range. Set a free range in `.env` with all four variables together, for example `EDGE_SUBNET=172.31.251.0/29`, `WEB_EDGE_IP=172.31.251.2`, `EDGE_IP_RANGE=172.31.251.4/30` and `EDGE_GATEWAY=172.31.251.1`. The gateway and the proxy's address must be inside the subnet and outside the range; the range, where the api gets its address, must be inside the subnet. Changing only `EDGE_SUBNET` leaves the other defaults outside it, and Docker refuses to create the network. Then run `docker compose up -d`.
 - **Everyone is locked out together after a few wrong passwords**: the api is not seeing the browser's address. Check that `FORWARDED_ALLOW_IPS` and the web container's `ipv4_address` are the same value (`docker compose config --quiet` must pass; never paste the full config output, it contains `.env` values).
 | Symptom | Cause and fix |
 |---|---|
