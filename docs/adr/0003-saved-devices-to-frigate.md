@@ -59,7 +59,7 @@ The apply (`frigate_apply.py`) now:
 3. Writes the new secret files.
 4. Only when a secret name is new: `POST /api/restart` and waits until Frigate has stopped and answers again, so it loads the new secrets.
 5. `config/save?save_option=restart` and waits for the restart. A 400 means Frigate kept its file: the previous secret files are put back and the error is shown (passwords and URLs removed from Frigate's message).
-6. Checks that `/api/config/raw` is exactly the saved text and that `/api/config` lists every expected camera.
+6. Checks that `/api/config/raw` holds the saved settings and that `/api/config` lists every expected camera. The comparison is of the parsed YAML, not the text: at startup Frigate migrates a file without its current `version` and rewrites it (other layout, a `version` key, a top-level `detect.enabled: true`). Only those two additions are accepted; any other difference fails the check.
 7. On any failure after step 3: previous secret files back; if Frigate's file had changed, restart (to load the previous secrets, which `config/save` needs), save the previous config with a restart, and check it. If that also fails, the message names the kept file.
 
 Only one apply runs at a time. Live view and recording pause for about one minute per restart.

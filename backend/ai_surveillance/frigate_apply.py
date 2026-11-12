@@ -14,11 +14,19 @@ Frigate 0.18.2 facts this relies on (checked in its source):
   a placeholder without a value stops go2rtc. So whenever Frigate may restart,
   the secret files cover both the file on disk and the one being saved: the
   apply writes old plus new secrets and removes the unused ones only at the end.
+- `/api/config/save` writes the request body unchanged, but at every start
+  Frigate migrates a file whose `version` is not its current one, "0.18-0"
+  (`migrate_frigate_config`, `frigate/util/config.py`; no `version` counts as
+  0.13). It then rewrites the file with ruamel.yaml: other indentation and
+  quoting, a `version` key and, when the file has no top-level `detect.enabled`,
+  `detect: {enabled: true}`. The generated config has no `version`, so
+  `/api/config/raw` after the restart is not the saved text. The check below
+  therefore compares the parsed data and accepts only those two additions.
 
 Sequence: build everything first (nothing changes on failure), keep Frigate's
 current config and the current secret files, write the new secret files,
 restart Frigate only when a device's secret is new, save the config with a
-restart, then check that Frigate runs exactly the saved file with the expected
+restart, then check that Frigate runs the saved settings with the expected
 cameras. On any failure after the first change the previous secret files and
 config are put back. URLs and passwords never appear in messages or logs.
 """
@@ -44,6 +52,8 @@ from .frigate_secrets import FrigateSecrets, SecretWriteError
 from .frigate_secrets import validate as validate_secrets
 
 SECRET_URL_RULE = "a single-line rtsp:// address of at most 2048 characters"
+# CURRENT_CONFIG_VERSION of Frigate 0.18.2 (frigate/util/config.py): what its migration writes as `version`.
+FRIGATE_CONFIG_VERSION = "0.18-0"
 
 log = logging.getLogger(__name__)
 
@@ -162,8 +172,38 @@ async def wait_for_restart(frigate: FrigateClient, settings: Settings) -> None:
         await asyncio.sleep(settings.frigate_restart_poll_seconds)
 
 
+def _mapping(text: str) -> dict | None:
+    try:
+        config = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return None  # the parser's message can quote the file, so it is not passed on
+    return config if isinstance(config, dict) else None
+
+
+def same_config(running_text: str, saved_text: str) -> bool:
+    """True when Frigate's file holds the settings that were saved.
+
+    Layout, quoting and comments may differ, because Frigate rewrites the file when it migrates
+    it at startup. Of the content, only what that migration adds to a file that lacks it is
+    accepted: a top-level `version` that is exactly "0.18-0" (any other value means a migration
+    this check does not know), and a top-level `detect` that is exactly `{enabled: true}`.
+    Any other difference (a changed value, a missing or extra key or camera) is a mismatch.
+    """
+    if running_text == saved_text:
+        return True
+    running, saved = _mapping(running_text), _mapping(saved_text)
+    if running is None or saved is None:
+        return False
+    added = dict(running)
+    if "version" not in saved and added.get("version") == FRIGATE_CONFIG_VERSION:
+        del added["version"]
+    if "detect" not in saved and added.get("detect") == {"enabled": True}:
+        del added["detect"]
+    return added == saved
+
+
 async def _verify(frigate: FrigateClient, config_text: str, expected: set[str]) -> None:
-    if await frigate.config_raw() != config_text:
+    if not same_config(await frigate.config_raw(), config_text):
         raise FrigateError("Frigate is not running the saved configuration")
     missing = expected - set(await frigate.cameras())
     if missing:

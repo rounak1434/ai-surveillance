@@ -48,13 +48,32 @@ class FakeFrigate:
         self.save_error_status: int | None = None
         self.stay_down_after_save = False
         self.drop_cameras: set[str] = set()
+        self.migrates = False  # most tests compare the file as text; the migration tests switch it on
+        self.alter_at_next_migration = None  # a change to the file's data, made once
 
     # --- simulated process lifecycle
+    def _migrate(self):
+        """Frigate's migrate_frigate_config at startup: a file without the current version is rewritten
+        with another layout, gets `version`, and gets a top-level `detect.enabled` when it has none.
+        (Unlike ruamel.yaml, this drops the comments and sorts the keys; the data is the same.)"""
+        config = yaml.safe_load(self.file)
+        if config.get("version") == "0.18-0":
+            return
+        if (config.get("detect") or {}).get("enabled") is None:
+            config.setdefault("detect", {})["enabled"] = True
+        config["version"] = "0.18-0"
+        if self.alter_at_next_migration:
+            self.alter_at_next_migration(config)
+            self.alter_at_next_migration = None
+        self.file = yaml.safe_dump(config, sort_keys=True, indent=4)
+
     def _start(self):
         """Frigate's startup: env.py reads FRIGATE_* files from /run/secrets once, and go2rtc's
         create_config.py exits on a stream placeholder without a value (go2rtc then does not run)."""
         self.env = set(CONTAINER_ENV) | {p.name for p in self.secrets_dir.iterdir() if p.name.startswith("FRIGATE_")}
         self.restarting = False
+        if self.migrates:
+            self._migrate()
         streams = yaml.safe_load(self.file)["go2rtc"]["streams"] or {}
         missing = sorted({var for sources in streams.values() for source in sources
                           for var in PLACEHOLDER.findall(source) if var not in self.env})
@@ -317,6 +336,108 @@ def test_missing_camera_after_restart_restores_previous_config_and_secrets(signe
     # restart (load secret), save+restart, then restore: restart (old secrets), save+restart
     assert fake.events.count("restart") == 2 and fake.events.count("save") == 2
     assert not [e for e in fake.events if e.startswith("go2rtc-failed")]
+
+
+@pytest.fixture
+def migrating(fake):
+    """A Frigate that has already migrated its file at an earlier start, as a running one has."""
+    fake.migrates = True
+    fake._start()
+    fake.events.clear()
+    return fake
+
+
+def test_file_rewritten_by_frigates_migration_passes_the_check(signed_in, settings, migrating, secrets_dir):
+    """Ubuntu, Frigate 0.18.2: the save succeeded, Frigate came back, and the apply was rolled back
+    because /api/config/raw was no longer the saved text."""
+    device = _approved(signed_in, settings)
+    resp = _apply(signed_in)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["cameras"] == [{"device_id": device["id"], "name": "Gate NVR", "camera": "gate_nvr"}]
+    assert migrating.events == ["restart", "started", "save", "started"]  # no restore
+    running = yaml.safe_load(migrating.file)
+    assert not migrating.file.startswith("#") and running["version"] == "0.18-0"  # not the text that was saved
+    assert running["detect"] == {"enabled": True}
+    assert {"entrance", "gate_nvr"} <= set(running["cameras"])
+    assert set(_secret_files(secrets_dir)) == {secret_name(device["id"], "main"), secret_name(device["id"], "sub")}
+
+
+def test_missing_camera_in_a_migrated_file_still_fails_and_rolls_back(signed_in, settings, migrating, secrets_dir):
+    before = migrating.file
+    _approved(signed_in, settings)
+    migrating.drop_cameras = {"gate_nvr"}
+    resp = _apply(signed_in)
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert "did not load the cameras ['gate_nvr']" in detail and "previous configuration was restored" in detail
+    assert migrating.file == before
+    assert _secret_files(secrets_dir) == {}
+    assert migrating.events.count("restart") == 2 and migrating.events.count("save") == 2
+
+
+@pytest.mark.parametrize("alter", [
+    lambda config: config["cameras"]["gate_nvr"]["detect"].update(width=1920),  # a changed value
+    lambda config: config["cameras"].pop("gate_nvr"),  # the camera is not in the file
+    lambda config: config["go2rtc"]["streams"].pop("gate_nvr"),
+    lambda config: config["cameras"].update(extra={"enabled": True}),  # a camera that was never saved
+    lambda config: config["detect"].update(enabled=False),  # not what the migration adds
+], ids=["changed-value", "camera-missing", "stream-missing", "extra-camera", "detect-switched-off"])
+def test_different_settings_in_frigates_file_fail_and_roll_back(signed_in, settings, migrating, secrets_dir, caplog, alter):
+    before = migrating.file
+    _approved(signed_in, settings)
+    migrating.alter_at_next_migration = alter  # the first restart runs the old file; the new one is changed
+    with caplog.at_level("INFO"):
+        resp = _apply(signed_in)
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert "Frigate is not running the saved configuration" in detail
+    assert "previous configuration was restored" in detail
+    assert migrating.file == before
+    assert _secret_files(secrets_dir) == {}
+    for text in (resp.text, caplog.text):
+        assert PASSWORD not in text and "fake-Pa55%21word" not in text and "rtsp://" not in text
+
+
+SAVED = "# header\nmqtt:\n  host: mosquitto\ncameras:\n  gate:\n    ffmpeg:\n      inputs:\n      - path: rtsp://127.0.0.1:8554/gate\n        roles:\n        - record\n"
+
+
+@pytest.mark.parametrize("running, same", [
+    (SAVED, True),
+    # Another layout, quoting and comments.
+    ('cameras:\n    gate:\n        ffmpeg:\n            inputs:\n              - path: "rtsp://127.0.0.1:8554/gate"\n'
+     "                roles: [record]\nmqtt: {host: mosquitto} # note\n", True),
+    (SAVED + "version: 0.18-0\ndetect:\n  enabled: true\n", True),
+    (SAVED + "version: 0.18-0\n", True),
+    # Only the version Frigate 0.18.2 writes is accepted as an addition.
+    (SAVED + "version: 0.17-0\n", False),
+    (SAVED + "version: 0.17-0\ndetect:\n  enabled: true\n", False),
+    (SAVED + "version: 0.19-0\n", False),
+    (SAVED + "version: 0.18\n", False),  # the number 0.18, not the text "0.18-0"
+    (SAVED + "version: 0.18-0\ndetect:\n  enabled: false\n", False),
+    (SAVED + "detect:\n  enabled: true\n  fps: 10\n", False),
+    (SAVED + "auth:\n  enabled: false\n", False),
+    (SAVED.replace("mosquitto", "elsewhere"), False),
+    (SAVED.replace("- record", "- detect"), False),
+    (SAVED.replace("  gate:", "  other:"), False),
+    ("mqtt:\n  host: mosquitto\n", False),  # no cameras
+    ("", False),
+    ("- a list\n", False),
+    ("cameras: [unclosed", False),
+])
+def test_same_config_compares_the_data_not_the_text(running, same):
+    from ai_surveillance.frigate_apply import same_config
+
+    assert same_config(running, SAVED) is same
+
+
+def test_same_config_does_not_ignore_a_version_or_detect_that_was_saved():
+    from ai_surveillance.frigate_apply import same_config
+
+    saved = SAVED + "version: 0.18-0\ndetect:\n  enabled: false\n"
+    assert same_config(saved.replace("# header\n", ""), saved)
+    assert not same_config(saved.replace("0.18-0", "0.17-0"), saved)
+    assert not same_config(saved.replace("enabled: false", "enabled: true"), saved)
+    assert not same_config(SAVED, saved)
 
 
 def test_restore_after_replacing_a_device_keeps_go2rtc_startable(signed_in, settings, fake, secrets_dir):
